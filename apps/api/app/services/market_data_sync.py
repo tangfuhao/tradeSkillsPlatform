@@ -164,6 +164,10 @@ def compute_sync_cutoff(now: datetime | None = None) -> datetime:
 
 
 def sync_incremental_okx_history(db: Session) -> int:
+    if not settings.okx_incremental_sync_enabled:
+        logger.info("OKX incremental sync is disabled by configuration; skipping startup API catch-up.")
+        return 0
+
     active_symbols = fetch_okx_active_usdt_swap_symbols()
     if not active_symbols:
         logger.warning("No active OKX USDT swap instruments were returned; skipping API sync.")

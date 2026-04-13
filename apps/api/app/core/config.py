@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     startup_sync_blocking: bool = True
     startup_sync_require_success: bool = True
     okx_api_base_url: str = "https://www.okx.com"
+    okx_incremental_sync_enabled: bool = False
     okx_request_pause_seconds: float = 0.15
     okx_history_limit: int = 100
     okx_incremental_max_gap_days: int = 7

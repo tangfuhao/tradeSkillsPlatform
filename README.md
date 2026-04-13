@@ -51,6 +51,7 @@ The current demo is opinionated around the requirements already clarified in pro
 - Protect startup from OKX API rate limits with `TRADE_SKILLS_OKX_INCREMENTAL_MAX_GAP_DAYS`
   - if the gap from local coverage to the target cutoff is too large, the symbol is marked `skipped`
   - large backfills should be handled by pre-downloaded CSV seed files, not by startup API pagination
+- For UI-first local debugging, you can set `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED=false` so startup still imports local CSVs but skips all OKX API catch-up.
 
 ### Seed-first workflow
 
@@ -139,6 +140,7 @@ See `infra/env/api.env.example`, especially:
 - `TRADE_SKILLS_HISTORICAL_BASE_TIMEFRAME`
 - `TRADE_SKILLS_STARTUP_SYNC_BLOCKING`
 - `TRADE_SKILLS_OKX_INCREMENTAL_MAX_GAP_DAYS`
+- `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED`
 - `TRADE_SKILLS_STARTUP_SYNC_TARGET_OFFSET_DAYS`
 - `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL`
 - `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET`
