@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from runner.config import settings
 from runner.schemas import AgentDecision, ExecuteRunRequest, ExecuteRunResponse, RiskTarget, ToolCallSummary
+from runner.services.openai_runtime import OpenAIToolDecisionEngine
 
 
 @dataclass(slots=True)
-class DemoDecisionEngine:
-    provider: str = "demo-heuristic"
+class HeuristicFallbackDecisionEngine:
+    provider: str = "heuristic-fallback"
 
     def execute(self, payload: ExecuteRunRequest) -> ExecuteRunResponse:
         candidates = payload.context.get("market_candidates", [])
@@ -28,7 +30,7 @@ class DemoDecisionEngine:
                     reason="No market candidates were provided to the Agent Runner.",
                     size_pct=0.0,
                 ),
-                reasoning_summary="The demo engine skipped because the tool context had no market candidates.",
+                reasoning_summary="The fallback engine skipped because the tool context had no market candidates.",
                 tool_calls=tool_calls,
                 provider=self.provider,
             )
@@ -43,7 +45,7 @@ class DemoDecisionEngine:
                 size_pct=min(max_position_pct, 0.10),
                 reason=(
                     f"{hottest.get('symbol')} shows an overheated short-term move, elevated speculative flow, "
-                    "and enough liquidity for a demo signal."
+                    "and enough liquidity for a fallback signal."
                 ),
                 stop_loss=RiskTarget(type="price_pct", value=stop_loss),
                 take_profit=RiskTarget(type="price_pct", value=take_profit),
@@ -54,7 +56,7 @@ class DemoDecisionEngine:
                 },
             )
             reasoning_summary = (
-                "The demo engine selected the hottest candidate, verified that the heat score cleared the "
+                "The fallback engine selected the hottest candidate, verified that the heat score cleared the "
                 "entry threshold, and opened a position under the Skill risk cap."
             )
         elif heat_score >= 0.14:
@@ -62,22 +64,23 @@ class DemoDecisionEngine:
                 action="watch",
                 symbol=hottest.get("symbol"),
                 size_pct=0.0,
-                reason="The candidate is interesting but still below the demo entry threshold.",
+                reason="The candidate is interesting but still below the fallback entry threshold.",
                 state_patch={
                     "focus_symbol": hottest.get("symbol"),
                     "last_action": "watch",
                     "previous_focus_symbol": state.get("focus_symbol"),
+                    "last_mode": payload.mode,
                 },
             )
-            reasoning_summary = "The demo engine kept the best candidate on watch and waited for stronger confirmation."
+            reasoning_summary = "The fallback engine kept the best candidate on watch and waited for stronger confirmation."
         else:
             decision = AgentDecision(
                 action="skip",
                 size_pct=0.0,
-                reason="Current market context does not justify a signal under the demo thresholds.",
-                state_patch={"last_action": "skip"},
+                reason="Current market context does not justify a signal under the fallback thresholds.",
+                state_patch={"last_action": "skip", "last_mode": payload.mode},
             )
-            reasoning_summary = "The demo engine skipped because no candidate cleared the watch threshold."
+            reasoning_summary = "The fallback engine skipped because no candidate cleared the watch threshold."
 
         return ExecuteRunResponse(
             decision=decision,
@@ -85,6 +88,27 @@ class DemoDecisionEngine:
             tool_calls=tool_calls,
             provider=self.provider,
         )
+
+
+@dataclass(slots=True)
+class ResilientDecisionEngine:
+    primary: OpenAIToolDecisionEngine
+    fallback: HeuristicFallbackDecisionEngine
+
+    def execute(self, payload: ExecuteRunRequest) -> ExecuteRunResponse:
+        try:
+            return self.primary.execute(payload)
+        except Exception as exc:  # noqa: BLE001
+            fallback_response = self.fallback.execute(payload)
+            return ExecuteRunResponse(
+                decision=fallback_response.decision,
+                reasoning_summary=(
+                    f"LLM runtime failed and fallback engine was used instead: {exc}. "
+                    f"{fallback_response.reasoning_summary}"
+                ),
+                tool_calls=fallback_response.tool_calls,
+                provider=f"{self.primary.provider}:fallback",
+            )
 
 
 def _candidate_score(item: dict[str, Any]) -> float:
@@ -111,11 +135,13 @@ def _build_tool_calls(payload: ExecuteRunRequest) -> list[ToolCallSummary]:
                     "mode": payload.mode,
                     "trigger_time": payload.trigger_time.isoformat(),
                 },
-                status="planned",
+                status="fallback-planned",
             )
         )
     return calls
 
 
-def get_engine() -> DemoDecisionEngine:
-    return DemoDecisionEngine()
+def get_engine() -> ResilientDecisionEngine:
+    fallback = HeuristicFallbackDecisionEngine()
+    primary = OpenAIToolDecisionEngine(provider=settings.provider)
+    return ResilientDecisionEngine(primary=primary, fallback=fallback)

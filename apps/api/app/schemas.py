@@ -120,3 +120,18 @@ class MarketOverviewResponse(BaseModel):
     coverage_end: str | None
     recent_csv_jobs: list[dict[str, Any]]
     sync_cursors: list[dict[str, Any]]
+
+
+class ToolGatewayExecuteRequest(BaseModel):
+    tool_name: str
+    skill_id: str
+    mode: Literal["backtest", "live_signal"]
+    trigger_time: datetime
+    as_of: datetime | None = None
+    trace_index: int | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGatewayExecuteResponse(BaseModel):
+    status: str
+    content: dict[str, Any] = Field(default_factory=dict)

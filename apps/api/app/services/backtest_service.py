@@ -14,7 +14,10 @@ from app.services.market_data_store import fetch_candles
 from app.services.preview_policy import determine_scope
 from app.services.serializers import backtest_to_dict, trace_to_dict
 from app.services.utils import ensure_utc, new_id, utc_now
-from app.tool_gateway.demo_gateway import build_market_snapshot_for_backtest, get_strategy_state, save_strategy_state
+from app.tool_gateway.demo_gateway import (
+    build_market_snapshot_for_backtest,
+    save_strategy_state,
+)
 
 
 class BacktestService:
@@ -93,7 +96,6 @@ def execute_backtest_job(run_id: str) -> None:
             for trace_index, trigger_time in enumerate(trigger_times):
                 market_snapshot = build_market_snapshot_for_backtest(db, trigger_time, trace_index)
                 market_data_provider = market_snapshot.get("provider", market_data_provider)
-                strategy_state = get_strategy_state(db, skill.id)
                 payload = {
                     "skill_id": skill.id,
                     "skill_title": skill.title,
@@ -103,8 +105,14 @@ def execute_backtest_job(run_id: str) -> None:
                     "envelope": envelope,
                     "context": {
                         **market_snapshot,
-                        "strategy_state": strategy_state,
                         "as_of": trigger_time.isoformat(),
+                        "tool_gateway": _build_tool_gateway_context(
+                            skill_id=skill.id,
+                            mode="backtest",
+                            trigger_time=trigger_time.isoformat(),
+                            as_of=trigger_time.isoformat(),
+                            trace_index=trace_index,
+                        ),
                     },
                 }
                 agent_response = execute_agent_run(payload)
@@ -198,3 +206,22 @@ def _compute_trade_return_from_history(
                     raw_return = -raw_return
                 return round(raw_return, 4), "historical_bar_close"
     return compute_demo_trade_return(fallback_step_index, direction), "synthetic_cycle"
+
+
+def _build_tool_gateway_context(
+    *,
+    skill_id: str,
+    mode: str,
+    trigger_time: str,
+    as_of: str,
+    trace_index: int | None,
+) -> dict[str, Any]:
+    return {
+        "execute_url": f"{settings.tool_gateway_base_url.rstrip('/')}{settings.api_prefix}/internal/tool-gateway/execute",
+        "shared_secret": settings.tool_gateway_shared_secret,
+        "skill_id": skill_id,
+        "mode": mode,
+        "trigger_time": trigger_time,
+        "as_of": as_of,
+        "trace_index": trace_index,
+    }

@@ -37,7 +37,8 @@ tradeSkills/
   2. try small incremental API catch-up for active OKX `USDT-SWAP` symbols
 - Historical candle query APIs with dynamic aggregation from stored `1m` bars into `15m`, `4h`, or other intervals
 - React demo dashboard with service pulse, market coverage, skill review controls, backtest launch, and recent signals
-- Agent Runner service boundary with a demo heuristic engine that can later be replaced by an LLM-backed runtime
+- Agent Runner service boundary with a real OpenAI-compatible LLM tool runtime plus a heuristic fallback for rate-limit or provider failures
+- Internal Tool Gateway HTTP path so the runner fetches market/state data on demand instead of relying on preloaded candle blobs
 
 ## Historical data behavior
 
@@ -116,6 +117,17 @@ Default local endpoints:
 - `POST /api/v1/live-tasks`
 - `POST /api/v1/live-tasks/{task_id}/trigger`
 
+## Agent runtime notes
+
+- The Agent Runner now reads raw Skill Markdown, lets the LLM call local tools, and returns a structured decision payload.
+- Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
+- The runner now calls the API's internal Tool Gateway over HTTP for `scan_market`, `get_candles`, `get_strategy_state`, `save_strategy_state`, `get_funding_rate`, and `get_open_interest`.
+- This removes the earlier preloaded `tool_context` dependency and makes the runner architecture closer to a real remote Agent runtime.
+- The current OpenAI-compatible provider used in local testing requires `stream=true` for `/v1/chat/completions`, so the runner uses a streamed tool loop internally.
+- If the LLM provider returns `429` or transient `5xx` errors, the runner retries with backoff and then falls back to the local heuristic engine so the platform still completes the run.
+- If your API runs on a non-default host or port, set `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL` so the runner callback URL points at the API process correctly.
+- Because your dev machine has a public IP, set `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET` to protect `/api/v1/internal/tool-gateway/execute`.
+
 ## Example environment variables
 
 See `infra/env/api.env.example`, especially:
@@ -126,6 +138,8 @@ See `infra/env/api.env.example`, especially:
 - `TRADE_SKILLS_STARTUP_SYNC_BLOCKING`
 - `TRADE_SKILLS_OKX_INCREMENTAL_MAX_GAP_DAYS`
 - `TRADE_SKILLS_STARTUP_SYNC_TARGET_OFFSET_DAYS`
+- `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL`
+- `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET`
 
 ## Useful commands
 
@@ -136,7 +150,7 @@ make smoke-web-json
 
 ## Notes for the next iteration
 
-1. Replace the demo decision engine with an LLM-backed Agent runtime that can really reason over Skill text and call tools.
-2. Add real OKX enrichments such as funding rate, open interest snapshots, and more accurate simulated execution.
-3. Add a proper migration layer instead of relying on `create_all` for schema evolution.
-4. Expose sync status and replay traces in richer operator views.
+1. Replace the current demo market enrichments with real OKX funding-rate and open-interest adapters.
+2. Add a proper migration layer instead of relying on `create_all` for schema evolution.
+3. Expose sync status and replay traces in richer operator views.
+4. Add stronger provider-side rate controls or queueing for larger backtests.
