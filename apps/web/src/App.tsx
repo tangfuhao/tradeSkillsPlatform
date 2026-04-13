@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 
 import {
   createBacktest,
@@ -29,31 +29,76 @@ import type {
   ToolCall,
 } from './types';
 
-const defaultSkill = `# Short-Term Overheat Short Skill
+const LOCALE = 'zh-CN';
 
-## Execution Cadence
-Every 15 minutes.
+const defaultSkill = `# 短线过热做空策略
 
-## Step 1 - Market Scan
-Scan OKX USDT perpetual swap instruments and rank candidates by strong short-term upside extension, rising speculative activity, and liquid trading volume.
+## 执行节奏
+每 15 分钟执行一次。
 
-## Step 2 - Market Data Collection
-Fetch 15m and 4h candles for the best candidates and compute EMA20, EMA60, RSI14, and ATR14.
-Fetch funding rate and open interest change when available.
+## 步骤 1 - 扫描市场
+扫描 OKX 的 USDT 永续合约，优先关注短时间快速拉升、成交活跃、情绪拥挤的币种。
 
-## Step 3 - AI Reasoning
-You are an AI trading agent. Reason about which altcoin looks the most overheated for a short setup.
-If market structure is unclear, skip the cycle.
+## 步骤 2 - 收集数据
+拉取候选标的 15 分钟和 4 小时 K 线，计算 EMA20、EMA60、RSI14 与 ATR14。
+若接口可用，再补充资金费率与持仓量变化。
 
-## Step 4 - Signal Output
-If confidence is high, open a short setup with at most 10 percent of equity.
+## 步骤 3 - AI 推理
+你是一名 AI 交易员，请判断哪一个山寨币最像短线过热后的做空机会。
+如果结构不清晰，直接跳过本轮。
 
-## Risk Control
-- Every position must define a stop loss at 2 percent.
-- Initial take profit target is 10 percent.
-- Max daily drawdown is 8 percent.
-- Max concurrent positions is 2.
-- Hedging is not allowed.`;
+## 步骤 4 - 输出信号
+仅当置信度足够高时才开仓做空，单次仓位不超过账户权益的 10%。
+
+## 风险控制
+- 每笔仓位必须带 2% 的止损。
+- 初始止盈目标为 10%。
+- 单日最大回撤不超过 8%。
+- 同时持仓不超过 2 个。
+- 不允许对冲。`;
+
+const reviewStatusLabels: Record<string, string> = {
+  preview_ready: '预览窗口可用',
+  review_pending: '等待人工审核',
+  approved_full_window: '已批准全量历史',
+  review_rejected: '已拒绝扩展历史',
+};
+
+const generalStatusLabels: Record<string, string> = {
+  ok: '正常',
+  healthy: '正常',
+  queued: '排队中',
+  running: '运行中',
+  completed: '已完成',
+  failed: '失败',
+  active: '已激活',
+  stored: '已存储',
+  pending: '待处理',
+  passed: '已通过',
+  validation_failed: '验证失败',
+  degraded: '降级',
+  skipped: '已跳过',
+  not_available: '暂不可用',
+};
+
+const actionLabels: Record<string, string> = {
+  skip: '跳过',
+  watch: '观察',
+  open_position: '开仓',
+  close_position: '平仓',
+  reduce_position: '减仓',
+  hold: '持有',
+};
+
+const directionLabels: Record<string, string> = {
+  long: '做多',
+  short: '做空',
+};
+
+const scopeLabels: Record<string, string> = {
+  preview: '预览窗口',
+  approved: '全量历史',
+};
 
 function toDateTimeLocal(value: Date): string {
   const offset = value.getTimezoneOffset();
@@ -61,14 +106,25 @@ function toDateTimeLocal(value: Date): string {
   return local.toISOString().slice(0, 16);
 }
 
+function translateToken(value?: string | null, dictionary: Record<string, string> = {}): string {
+  if (!value) return '--';
+  return dictionary[value] ?? value.replace(/_/g, ' ');
+}
+
 function formatTime(value?: string | null): string {
   if (!value) return '--';
-  return new Date(value).toLocaleString();
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return new Intl.DateTimeFormat(LOCALE, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    hour12: false,
+  }).format(date);
 }
 
 function formatCount(value?: number | null): string {
-  if (typeof value !== 'number') return '--';
-  return new Intl.NumberFormat().format(value);
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
+  return new Intl.NumberFormat(LOCALE).format(value);
 }
 
 function formatPercent(value?: number | null): string {
@@ -77,31 +133,136 @@ function formatPercent(value?: number | null): string {
 }
 
 function describeReviewStatus(status?: ReviewStatus): string {
-  if (status === 'approved_full_window') return 'approved for larger history windows';
-  if (status === 'review_pending') return 'awaiting operator review';
-  if (status === 'review_rejected') return 'rejected for extended history';
-  return 'preview-ready for the default recent window';
+  return translateToken(status, reviewStatusLabels);
+}
+
+function describeStatus(status?: string | null): string {
+  return translateToken(status, generalStatusLabels);
+}
+
+function describeAction(action?: string | null): string {
+  return translateToken(action, actionLabels);
+}
+
+function describeDirection(direction?: string | null): string {
+  return translateToken(direction, directionLabels);
+}
+
+function describeScope(scope?: string | null): string {
+  return translateToken(scope, scopeLabels);
 }
 
 function summarizeDecision(decision: Record<string, unknown>): string {
-  const action = typeof decision.action === 'string' ? decision.action : 'skip';
+  const action = describeAction(typeof decision.action === 'string' ? decision.action : 'skip');
   const symbol = typeof decision.symbol === 'string' ? decision.symbol : null;
-  const direction = typeof decision.direction === 'string' ? decision.direction : null;
+  const direction = describeDirection(typeof decision.direction === 'string' ? decision.direction : null);
   const sizePct = typeof decision.size_pct === 'number' ? formatPercent(decision.size_pct) : null;
-  return [action, symbol, direction, sizePct].filter(Boolean).join(' / ');
+  return [action, symbol, direction === '--' ? null : direction, sizePct].filter(Boolean).join(' / ');
 }
 
 function summarizeToolSequence(toolCalls: ToolCall[]): string {
-  if (!toolCalls.length) return 'No tool calls recorded';
+  if (!toolCalls.length) return '暂无工具调用';
   return toolCalls.map((call) => call.tool_name).join(' -> ');
 }
 
 function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
+  return JSON.stringify(value, null, 2) ?? 'null';
 }
 
 function isBacktestActive(status?: string): boolean {
   return status === 'queued' || status === 'running';
+}
+
+function countSignalsToday(signals: LiveSignal[]): number {
+  const today = new Intl.DateTimeFormat(LOCALE, { dateStyle: 'short' }).format(new Date());
+  return signals.filter((signal) => {
+    const signalDate = new Date(signal.trigger_time);
+    if (Number.isNaN(signalDate.getTime())) return false;
+    return new Intl.DateTimeFormat(LOCALE, { dateStyle: 'short' }).format(signalDate) === today;
+  }).length;
+}
+
+function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutral' {
+  if (!status) return 'neutral';
+  if (['ok', 'healthy', 'completed', 'active', 'stored', 'passed'].includes(status)) {
+    return 'ok';
+  }
+  if (['queued', 'running', 'pending', 'preview_ready', 'review_pending', 'skipped'].includes(status)) {
+    return 'warn';
+  }
+  if (['failed', 'review_rejected', 'validation_failed', 'degraded'].includes(status)) {
+    return 'error';
+  }
+  return 'neutral';
+}
+
+type PanelHeaderProps = {
+  title: string;
+  subtitle?: string;
+  action?: ReactNode;
+};
+
+function PanelHeader({ title, subtitle, action }: PanelHeaderProps) {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <h2>{title}</h2>
+        {subtitle ? <span>{subtitle}</span> : null}
+      </div>
+      {action ?? null}
+    </div>
+  );
+}
+
+type MetricCardProps = {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  tone?: 'accent' | 'warm' | 'neutral';
+};
+
+function MetricCard({ label, value, detail, tone = 'neutral' }: MetricCardProps) {
+  return (
+    <div className={`metric-card tone-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+type ListCardProps = {
+  active?: boolean;
+  interactive?: boolean;
+  title: ReactNode;
+  subtitle: ReactNode;
+  meta?: ReactNode;
+  badge?: ReactNode;
+  onClick?: () => void;
+};
+
+function ListCard({ active = false, interactive = true, title, subtitle, meta, badge, onClick }: ListCardProps) {
+  const className = `list-card ${active ? 'selected-card' : ''} ${interactive ? '' : 'static'}`.trim();
+  const content = (
+    <>
+      <div className="list-card-top">
+        <strong>{title}</strong>
+        {badge ? <span className="mini-badge">{badge}</span> : null}
+      </div>
+      <span>{subtitle}</span>
+      {meta ? <small>{meta}</small> : null}
+    </>
+  );
+
+  if (!interactive) {
+    return <div className={className}>{content}</div>;
+  }
+
+  return (
+    <button className={className} type="button" onClick={onClick}>
+      {content}
+    </button>
+  );
 }
 
 export default function App() {
@@ -118,7 +279,7 @@ export default function App() {
   const [backtestTraces, setBacktestTraces] = useState<BacktestTrace[]>([]);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
-  const [message, setMessage] = useState('Ready to orchestrate a Skill.');
+  const [message, setMessage] = useState('准备就绪，可以开始编排新的策略。');
   const [loading, setLoading] = useState(false);
   const [backtestStart, setBacktestStart] = useState(toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
   const [backtestEnd, setBacktestEnd] = useState(toDateTimeLocal(new Date()));
@@ -136,9 +297,44 @@ export default function App() {
     () => backtests.find((run) => run.id === selectedBacktestId) ?? backtests[0],
     [backtests, selectedBacktestId],
   );
+
   const latestCsvJob = marketOverview?.recent_csv_jobs?.[0] ?? null;
   const skippedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'skipped').length ?? 0;
   const traceAutoRefresh = isBacktestActive(selectedBacktest?.status);
+
+  const heroMetrics = useMemo(() => {
+    const approvedCount = skills.filter((skill) => skill.review_status === 'approved_full_window').length;
+    const activeBacktests = backtests.filter((run) => isBacktestActive(run.status)).length;
+    const activeLiveTasks = liveTasks.filter((task) => task.status === 'active').length;
+    const todaySignals = countSignalsToday(signals);
+
+    return [
+      {
+        label: '策略版本',
+        value: formatCount(skills.length),
+        detail: `${formatCount(approvedCount)} 个已批准全量历史`,
+        tone: 'accent' as const,
+      },
+      {
+        label: '回放队列',
+        value: formatCount(activeBacktests),
+        detail: backtests.length ? `${formatCount(backtests.length)} 条回放记录` : '等待第一次回放',
+        tone: 'neutral' as const,
+      },
+      {
+        label: '实时任务',
+        value: formatCount(activeLiveTasks),
+        detail: activeLiveTasks ? '正在按节奏运行' : '尚未激活实时任务',
+        tone: 'warm' as const,
+      },
+      {
+        label: '今日信号',
+        value: formatCount(todaySignals),
+        detail: signals.length ? `${formatCount(signals.length)} 条累计输出` : '暂无信号存档',
+        tone: 'neutral' as const,
+      },
+    ];
+  }, [backtests, liveTasks, signals, skills]);
 
   async function refreshDashboard() {
     const [apiHealth, runnerHealth, overview, nextSkills, nextBacktests, nextLiveTasks, nextSignals] = await Promise.all([
@@ -150,8 +346,9 @@ export default function App() {
       listLiveTasks(),
       listSignals(),
     ]);
+
     setServicePulse([
-      { name: 'API', status: apiHealth.status, details: getApiBaseUrl() },
+      { name: '后端 API', status: apiHealth.status, details: getApiBaseUrl() },
       { name: 'Agent Runner', status: runnerHealth.status, details: getAgentRunnerBaseUrl() },
     ]);
     setMarketOverview(overview);
@@ -178,12 +375,13 @@ export default function App() {
     if (!silent) {
       setTraceLoading(true);
     }
+
     try {
       const traces = await listBacktestTraces(runId);
       setBacktestTraces(traces);
       setTraceError(null);
     } catch (error) {
-      setTraceError(`Trace fetch failed: ${String(error)}`);
+      setTraceError(`读取轨迹失败：${String(error)}`);
     } finally {
       if (!silent) {
         setTraceLoading(false);
@@ -193,7 +391,7 @@ export default function App() {
 
   useEffect(() => {
     refreshDashboard().catch((error) => {
-      setMessage(`Bootstrap check failed: ${String(error)}`);
+      setMessage(`初始化检查失败：${String(error)}`);
     });
   }, []);
 
@@ -203,8 +401,9 @@ export default function App() {
       setTraceError(null);
       return;
     }
+
     refreshTraceViewer(selectedBacktest.id).catch((error) => {
-      setTraceError(`Trace fetch failed: ${String(error)}`);
+      setTraceError(`读取轨迹失败：${String(error)}`);
     });
   }, [selectedBacktest?.id]);
 
@@ -212,25 +411,33 @@ export default function App() {
     if (!selectedBacktest?.id || !traceAutoRefresh) {
       return undefined;
     }
+
     const timer = window.setInterval(() => {
       Promise.all([refreshDashboard(), refreshTraceViewer(selectedBacktest.id, true)]).catch((error) => {
-        setTraceError(`Trace refresh failed: ${String(error)}`);
+        setTraceError(`刷新轨迹失败：${String(error)}`);
       });
     }, 2500);
+
     return () => window.clearInterval(timer);
   }, [selectedBacktest?.id, traceAutoRefresh]);
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const nextSkillText = skillText.trim();
+    if (!nextSkillText) {
+      setMessage('请先输入策略内容，再上传。');
+      return;
+    }
+
     setLoading(true);
-    setMessage('Uploading Skill and extracting its runtime envelope...');
+    setMessage('正在上传策略并提取运行约束...');
     try {
-      const created = await createSkill({ skill_text: skillText });
+      const created = await createSkill({ skill_text: nextSkillText });
       setSelectedSkillId(created.id);
-      setMessage(`Skill ${created.title} is now preview-ready.`);
+      setMessage(`策略《${created.title}》已生成，可在预览窗口中使用。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`Skill upload failed: ${String(error)}`);
+      setMessage(`策略上传失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -239,25 +446,41 @@ export default function App() {
   async function handleBacktest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedSkill) {
-      setMessage('Create or select a Skill before launching a backtest.');
+      setMessage('请先创建或选择一个策略，再发起回放。');
       return;
     }
+
+    const startDate = new Date(backtestStart);
+    const endDate = new Date(backtestEnd);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      setMessage('回放时间无效，请重新选择开始与结束时间。');
+      return;
+    }
+    if (startDate >= endDate) {
+      setMessage('回放结束时间必须晚于开始时间。');
+      return;
+    }
+    if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
+      setMessage('初始资金必须是大于 0 的数字。');
+      return;
+    }
+
     setLoading(true);
-    setMessage('Queueing a replay-based backtest run...');
+    setMessage('正在排队创建回放任务...');
     try {
       const created = await createBacktest({
         skill_id: selectedSkill.id,
-        start_time: new Date(backtestStart).toISOString(),
-        end_time: new Date(backtestEnd).toISOString(),
+        start_time: startDate.toISOString(),
+        end_time: endDate.toISOString(),
         initial_capital: initialCapital,
       });
       setSelectedBacktestId(created.id);
       setBacktestTraces([]);
       setTraceError(null);
-      setMessage(`Backtest ${created.id} is queued. Trace Viewer will auto-refresh while it runs.`);
+      setMessage(`回放任务 ${created.id} 已进入队列，执行轨迹会自动刷新。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`Backtest creation failed: ${String(error)}`);
+      setMessage(`创建回放失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -265,18 +488,19 @@ export default function App() {
 
   async function handleReviewUpdate(reviewStatus: ReviewStatus) {
     if (!selectedSkill) {
-      setMessage('Select a Skill before changing review state.');
+      setMessage('请先选择一个策略，再更新审核状态。');
       return;
     }
+
     setLoading(true);
-    setMessage(`Updating review state for ${selectedSkill.title}...`);
+    setMessage(`正在更新《${selectedSkill.title}》的审核状态...`);
     try {
       const updated = await updateSkillReviewState(selectedSkill.id, reviewStatus);
       setSelectedSkillId(updated.id);
-      setMessage(`Skill ${updated.title} is now ${describeReviewStatus(updated.review_status)}.`);
+      setMessage(`策略《${updated.title}》状态已更新为：${describeReviewStatus(updated.review_status)}。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`Review state update failed: ${String(error)}`);
+      setMessage(`更新审核状态失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -284,18 +508,19 @@ export default function App() {
 
   async function handleActivateLiveTask() {
     if (!selectedSkill) {
-      setMessage('Create or select a Skill before activating live mode.');
+      setMessage('请先创建或选择一个策略，再开启实时任务。');
       return;
     }
+
     setLoading(true);
-    setMessage('Activating a live signal task from the Skill cadence...');
+    setMessage('正在根据策略节奏激活实时任务...');
     try {
       const created = await createLiveTask({ skill_id: selectedSkill.id });
       setSelectedTaskId(created.id);
-      setMessage(`Live task ${created.id} is active on cadence ${created.cadence}.`);
+      setMessage(`实时任务 ${created.id} 已激活，执行节奏为 ${created.cadence}。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`Live task activation failed: ${String(error)}`);
+      setMessage(`激活实时任务失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -303,17 +528,18 @@ export default function App() {
 
   async function handleTriggerLiveTask() {
     if (!selectedTask) {
-      setMessage('Activate a live task before triggering one manually.');
+      setMessage('请先激活一个实时任务，再手动触发。');
       return;
     }
+
     setLoading(true);
-    setMessage('Running a short-lived live signal task now...');
+    setMessage('正在立刻执行一次实时信号任务...');
     try {
       await triggerLiveTask(selectedTask.id);
-      setMessage(`Live task ${selectedTask.id} emitted a new stored signal.`);
+      setMessage(`实时任务 ${selectedTask.id} 已产出新的信号记录。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`Manual live trigger failed: ${String(error)}`);
+      setMessage(`手动触发失败：${String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -322,132 +548,165 @@ export default function App() {
   return (
     <div className="shell">
       <header className="hero">
-        <div>
-          <p className="eyebrow">Skill-Driven Agent Runtime</p>
-          <h1>TradeSkills Demo Console</h1>
+        <div className="hero-copy-block">
+          <p className="eyebrow">TradeSkills 中文控制台</p>
+          <h1>把策略编排、历史回放和实时信号统一收进一个中文版工作台。</h1>
           <p className="hero-copy">
-            Upload a natural-language trading Skill, extract a Skill Envelope, replay it against local OKX history,
-            or activate a live periodic signal loop from the same runtime contract.
+            用自然语言撰写交易 Skill，系统会抽取运行约束、连接本地 OKX 历史数据，并把回放实验和实时任务放在同一条工作流里。
           </p>
+          <div className="hero-tags">
+            <span className="hero-tag">中文界面</span>
+            <span className="hero-tag">回放优先</span>
+            <span className="hero-tag">统一风控</span>
+            <span className="hero-tag">实时信号</span>
+          </div>
         </div>
-        <div className="status-ribbon">
-          <span className="status-dot" />
-          <span>{loading ? 'Processing...' : message}</span>
+
+        <div className="hero-side">
+          <div className={`status-ribbon ${loading ? 'is-loading' : ''}`}>
+            <span className="status-dot" />
+            <div>
+              <small>{loading ? '系统忙碌中' : '系统提示'}</small>
+              <strong>{loading ? '正在处理请求' : '控制台已就绪'}</strong>
+              <p>{message}</p>
+            </div>
+          </div>
+
+          <div className="hero-metrics">
+            {heroMetrics.map((item) => (
+              <MetricCard key={item.label} label={item.label} value={item.value} detail={item.detail} tone={item.tone} />
+            ))}
+          </div>
         </div>
       </header>
 
-      <section className="grid two-up">
-        <article className="panel pulse-panel">
-          <div className="panel-header">
-            <h2>Service Pulse</h2>
-            <button type="button" onClick={() => refreshDashboard().catch((error) => setMessage(String(error)))}>
-              Refresh
-            </button>
-          </div>
+      <section className="grid overview-grid">
+        <article className="panel">
+          <PanelHeader
+            title="运行脉冲"
+            subtitle="检查核心服务是否在线，以及当前连接的地址。"
+            action={
+              <button type="button" onClick={() => refreshDashboard().catch((error) => setMessage(`刷新失败：${String(error)}`))}>
+                刷新数据
+              </button>
+            }
+          />
           <div className="pulse-grid">
-            {servicePulse.map((item) => (
-              <div className="pulse-card" key={item.name}>
-                <p>{item.name}</p>
-                <strong>{item.status}</strong>
-                <span>{item.details}</span>
+            {servicePulse.length ? (
+              servicePulse.map((item) => (
+                <div className={`pulse-card tone-${toneForStatus(item.status)}`} key={item.name}>
+                  <div className="pulse-card-head">
+                    <p>{item.name}</p>
+                    <span className={`status-chip chip-${toneForStatus(item.status)}`}>{describeStatus(item.status)}</span>
+                  </div>
+                  <strong>{item.details ?? '--'}</strong>
+                  <span>状态回传正常后，这里会显示你当前使用的服务入口。</span>
+                </div>
+              ))
+            ) : (
+              <div className="empty-state">
+                <p>正在拉取服务状态，请稍候。</p>
               </div>
-            ))}
+            )}
           </div>
         </article>
 
-        <article className="panel insight-panel">
-          <div className="panel-header">
-            <h2>Market Coverage</h2>
-            <span>Blocking startup sync + dynamic timeframe aggregation</span>
-          </div>
+        <article className="panel">
+          <PanelHeader title="市场数据面板" subtitle="本地历史覆盖、基础粒度与最近同步结果一目了然。" />
           <div className="insight-grid">
-            <div>
-              <span>Symbols</span>
-              <strong>{formatCount(marketOverview?.total_symbols)}</strong>
-            </div>
-            <div>
-              <span>1m Bars</span>
-              <strong>{formatCount(marketOverview?.total_candles)}</strong>
-            </div>
-            <div>
-              <span>Coverage Start</span>
-              <strong className="mini-metric">{formatTime(marketOverview?.coverage_start)}</strong>
-            </div>
-            <div>
-              <span>Coverage End</span>
-              <strong className="mini-metric">{formatTime(marketOverview?.coverage_end)}</strong>
-            </div>
+            <MetricCard label="覆盖币种" value={formatCount(marketOverview?.total_symbols)} detail="已纳入本地历史仓库的交易标的数量" tone="accent" />
+            <MetricCard label="1 分钟 K 线" value={formatCount(marketOverview?.total_candles)} detail="供回放与聚合计算使用的基础数据量" />
+            <MetricCard label="覆盖开始" value={formatTime(marketOverview?.coverage_start)} detail="最早可用于回放的数据时间点" />
+            <MetricCard label="覆盖结束" value={formatTime(marketOverview?.coverage_end)} detail="最近一次落盘后的时间边界" tone="warm" />
           </div>
           <div className="meta-strip">
             <div className="info-box compact-box">
-              <p>Base timeframe</p>
+              <p>基础周期</p>
               <strong>{marketOverview?.base_timeframe ?? '--'}</strong>
             </div>
             <div className="info-box compact-box">
-              <p>Latest seed import</p>
-              <strong>{latestCsvJob ? `${formatCount(latestCsvJob.rows_inserted)} rows` : '--'}</strong>
+              <p>最近导入</p>
+              <strong>{latestCsvJob ? `${formatCount(latestCsvJob.rows_inserted)} 行` : '--'}</strong>
             </div>
             <div className="info-box compact-box">
-              <p>API sync skips</p>
+              <p>同步跳过</p>
               <strong>{formatCount(skippedSyncCount)}</strong>
             </div>
           </div>
         </article>
       </section>
 
-      <section className="grid main-grid">
-        <article className="panel tall-panel">
-          <div className="panel-header">
-            <h2>Skill Composer</h2>
-            <span>Markdown + AI reasoning + risk control</span>
-          </div>
+      <section className="grid workspace-grid">
+        <article className="panel tall-panel editor-panel">
+          <PanelHeader title="策略编排台" subtitle="支持 Markdown、AI 推理说明与风险条款，适合直接写中文策略。" />
           <form className="stack" onSubmit={handleUpload}>
-            <textarea value={skillText} onChange={(event) => setSkillText(event.target.value)} rows={22} />
-            <button className="primary-button" type="submit" disabled={loading}>
-              Upload Skill
-            </button>
+            <div className="info-box editor-note">
+              <p>提示：直接用中文描述交易想法即可，系统会自动提取执行节奏、工具依赖与风险约束。</p>
+            </div>
+            <textarea
+              value={skillText}
+              onChange={(event) => setSkillText(event.target.value)}
+              rows={22}
+              placeholder="在这里粘贴或撰写你的交易 Skill..."
+            />
+            <div className="form-footer">
+              <p>上传后会生成可回放、可审核、可激活实时任务的统一策略版本。</p>
+              <button className="primary-button" type="submit" disabled={loading}>
+                上传策略
+              </button>
+            </div>
           </form>
         </article>
 
         <article className="panel tall-panel">
-          <div className="panel-header">
-            <h2>Run Lab</h2>
-            <span>Replay first, then live signal activation</span>
-          </div>
+          <PanelHeader title="执行实验室" subtitle="先审核策略，再发起回放，最后进入实时信号阶段。" />
           <div className="stack compact">
             <label>
-              <span>Selected Skill</span>
+              <span>当前策略</span>
               <select value={selectedSkill?.id ?? ''} onChange={(event) => setSelectedSkillId(event.target.value)}>
-                {skills.map((skill) => (
-                  <option key={skill.id} value={skill.id}>
-                    {skill.title}
-                  </option>
-                ))}
+                {skills.length ? (
+                  skills.map((skill) => (
+                    <option key={skill.id} value={skill.id}>
+                      {skill.title}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">暂无策略，请先上传</option>
+                )}
               </select>
             </label>
 
             <div className="info-box skill-status-box">
-              <strong>{selectedSkill?.title ?? 'No Skill yet'}</strong>
+              <div className="info-head">
+                <strong>{selectedSkill?.title ?? '还没有策略版本'}</strong>
+                <span className={`status-chip chip-${toneForStatus(selectedSkill?.review_status)}`}>
+                  {selectedSkill ? describeReviewStatus(selectedSkill.review_status) : '等待创建'}
+                </span>
+              </div>
+              <p>验证状态：{selectedSkill ? describeStatus(selectedSkill.validation_status) : '--'}</p>
+              <p>执行节奏：{selectedSkill?.envelope?.trigger?.value ?? '--'}</p>
               <p>
-                Cadence: {selectedSkill?.envelope?.trigger?.value ?? '--'} | Review: {selectedSkill?.review_status ?? '--'}
+                预览窗口：{formatTime(selectedSkill?.preview_window?.start)} - {formatTime(selectedSkill?.preview_window?.end)}
               </p>
-              <p>
-                Preview window: {formatTime(selectedSkill?.preview_window?.start)} -{' '}
-                {formatTime(selectedSkill?.preview_window?.end)}
-              </p>
-              <p>
-                Tools: {(selectedSkill?.envelope?.tool_contract?.required_tools ?? []).join(', ') || '--'}
-              </p>
+              <p>工具约束：{(selectedSkill?.envelope?.tool_contract?.required_tools ?? []).join('、') || '系统暂未抽取工具限制'}</p>
             </div>
 
-            <div className="field-row action-row">
+            <div className="review-actions">
               <button
                 className="secondary-button"
                 type="button"
                 onClick={() => handleReviewUpdate('preview_ready')}
                 disabled={loading || !selectedSkill}
               >
-                Mark Preview
+                设为预览
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => handleReviewUpdate('review_pending')}
+                disabled={loading || !selectedSkill}
+              >
+                提交审核
               </button>
               <button
                 className="primary-button"
@@ -455,30 +714,27 @@ export default function App() {
                 onClick={() => handleReviewUpdate('approved_full_window')}
                 disabled={loading || !selectedSkill}
               >
-                Approve Full Window
+                批准全量历史
               </button>
             </div>
 
             <div className="info-box hint-box">
-              <p>
-                Preview-ready Skills are restricted to the recent default window. Use full-window approval before replaying
-                older seeded history, especially when your local CSV coverage does not overlap the latest 90 days.
-              </p>
+              <p>预览策略默认只允许在最近窗口中回放。若你要重放更早的 CSV 历史数据，请先完成全量历史批准。</p>
             </div>
 
             <form className="stack compact" onSubmit={handleBacktest}>
               <div className="field-row">
                 <label>
-                  <span>Backtest Start</span>
+                  <span>回放开始时间</span>
                   <input type="datetime-local" value={backtestStart} onChange={(event) => setBacktestStart(event.target.value)} />
                 </label>
                 <label>
-                  <span>Backtest End</span>
+                  <span>回放结束时间</span>
                   <input type="datetime-local" value={backtestEnd} onChange={(event) => setBacktestEnd(event.target.value)} />
                 </label>
               </div>
               <label>
-                <span>Initial Capital</span>
+                <span>初始资金</span>
                 <input
                   type="number"
                   min={1000}
@@ -488,143 +744,157 @@ export default function App() {
                 />
               </label>
               <button className="primary-button" type="submit" disabled={loading || !selectedSkill}>
-                Launch Backtest
+                发起回放
               </button>
             </form>
 
             <div className="divider" />
 
+            <div className="info-box compact-box live-task-box">
+              <p>当前实时任务</p>
+              <strong>{selectedTask?.id ?? '尚未激活'}</strong>
+              <span>
+                状态：{selectedTask ? describeStatus(selectedTask.status) : '--'} / 节奏：{selectedTask?.cadence ?? '--'}
+              </span>
+              <small>上次触发：{formatTime(selectedTask?.last_triggered_at)}</small>
+            </div>
+
             <div className="field-row action-row">
               <button className="secondary-button" type="button" onClick={handleActivateLiveTask} disabled={loading || !selectedSkill}>
-                Activate Live Task
+                开启实时任务
               </button>
               <button className="primary-button" type="button" onClick={handleTriggerLiveTask} disabled={loading || !selectedTask}>
-                Trigger Live Now
+                立即触发一次
               </button>
             </div>
           </div>
         </article>
       </section>
 
-      <section className="grid three-up">
+      <section className="grid list-grid">
         <article className="panel">
-          <div className="panel-header">
-            <h2>Skills</h2>
-          </div>
+          <PanelHeader title="策略列表" subtitle="查看所有策略版本，并快速切换当前工作对象。" />
           <div className="list-shell">
-            {skills.map((skill) => (
-              <button
-                className={`list-card ${selectedSkill?.id === skill.id ? 'selected-card' : ''}`}
-                key={skill.id}
-                type="button"
-                onClick={() => setSelectedSkillId(skill.id)}
-              >
-                <strong>{skill.title}</strong>
-                <span>{describeReviewStatus(skill.review_status)}</span>
-                <small>{skill.envelope?.trigger?.value ?? '--'} cadence</small>
-              </button>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Backtest Feed</h2>
-            <span>Pick one to inspect its trace</span>
-          </div>
-          <div className="list-shell">
-            {backtests.map((run) => {
-              const totalReturnPct = typeof run.summary?.total_return_pct === 'number'
-                ? `${(Number(run.summary.total_return_pct) * 100).toFixed(2)}%`
-                : 'Waiting for summary';
-              return (
-                <button
-                  className={`list-card ${selectedBacktest?.id === run.id ? 'selected-card' : ''}`}
-                  key={run.id}
-                  type="button"
-                  onClick={() => setSelectedBacktestId(run.id)}
-                >
-                  <strong>{run.id}</strong>
-                  <span>
-                    {run.status} / {run.scope}
-                  </span>
-                  <small>{totalReturnPct}</small>
-                </button>
-              );
-            })}
-          </div>
-        </article>
-
-        <article className="panel">
-          <div className="panel-header">
-            <h2>Recent Signals</h2>
-          </div>
-          <div className="list-shell">
-            {signals.map((signal) => (
-              <div className="list-card static" key={signal.id}>
-                <strong>{signal.signal.symbol ?? signal.signal.action ?? signal.id}</strong>
-                <span>
-                  {signal.signal.action ?? '--'} / {signal.signal.direction ?? '--'}
-                </span>
-                <small>{formatTime(signal.trigger_time)}</small>
+            {skills.length ? (
+              skills.map((skill) => (
+                <ListCard
+                  key={skill.id}
+                  active={selectedSkill?.id === skill.id}
+                  title={skill.title}
+                  subtitle={`${describeReviewStatus(skill.review_status)} / ${describeStatus(skill.validation_status)}`}
+                  meta={`${skill.envelope?.trigger?.value ?? '--'} 节奏`}
+                  badge={skill.review_status === 'approved_full_window' ? '全量' : '预览'}
+                  onClick={() => setSelectedSkillId(skill.id)}
+                />
+              ))
+            ) : (
+              <div className="empty-state">
+                <p>还没有策略版本，先在左侧编排台上传一份中文策略吧。</p>
               </div>
-            ))}
+            )}
+          </div>
+        </article>
+
+        <article className="panel">
+          <PanelHeader title="回放记录" subtitle="选中任意一次回放，即可在下方查看完整执行轨迹。" />
+          <div className="list-shell">
+            {backtests.length ? (
+              backtests.map((run) => {
+                const totalReturnPct = typeof run.summary?.total_return_pct === 'number'
+                  ? `收益 ${formatPercent(Number(run.summary.total_return_pct))}`
+                  : '等待汇总';
+                return (
+                  <ListCard
+                    key={run.id}
+                    active={selectedBacktest?.id === run.id}
+                    title={run.id}
+                    subtitle={`${describeStatus(run.status)} / ${describeScope(run.scope)}`}
+                    meta={`${totalReturnPct} / ${formatTime(run.created_at)}`}
+                    badge={describeStatus(run.status)}
+                    onClick={() => setSelectedBacktestId(run.id)}
+                  />
+                );
+              })
+            ) : (
+              <div className="empty-state">
+                <p>还没有回放记录，先选择策略并发起一次回放。</p>
+              </div>
+            )}
+          </div>
+        </article>
+
+        <article className="panel">
+          <PanelHeader title="最近信号" subtitle="查看最近一次实时任务输出的交易动作与方向。" />
+          <div className="list-shell">
+            {signals.length ? (
+              signals.map((signal) => (
+                <ListCard
+                  key={signal.id}
+                  interactive={false}
+                  title={signal.signal.symbol ?? describeAction(signal.signal.action) ?? signal.id}
+                  subtitle={`${describeAction(signal.signal.action)} / ${describeDirection(signal.signal.direction)}`}
+                  meta={`${describeStatus(signal.delivery_status)} / ${formatTime(signal.trigger_time)}`}
+                  badge={describeStatus(signal.delivery_status)}
+                />
+              ))
+            ) : (
+              <div className="empty-state">
+                <p>暂无实时信号输出，激活任务后这里会持续刷新。</p>
+              </div>
+            )}
           </div>
         </article>
       </section>
 
       <section className="grid">
-        <article className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>Execution Trace</h2>
-              <span>Observe each replay trigger, tool sequence, and structured decision.</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => selectedBacktest?.id && refreshTraceViewer(selectedBacktest.id)}
-              disabled={!selectedBacktest?.id || traceLoading}
-            >
-              {traceLoading ? 'Loading...' : 'Refresh Trace'}
-            </button>
-          </div>
+        <article className="panel trace-panel">
+          <PanelHeader
+            title="执行轨迹"
+            subtitle="按触发步骤查看 Agent 推理摘要、工具链路与结构化决策。"
+            action={
+              <button
+                type="button"
+                onClick={() => selectedBacktest?.id && refreshTraceViewer(selectedBacktest.id)}
+                disabled={!selectedBacktest?.id || traceLoading}
+              >
+                {traceLoading ? '轨迹加载中...' : '刷新轨迹'}
+              </button>
+            }
+          />
 
           {!selectedBacktest ? (
-            <div className="info-box">
-              <p>Create a backtest first, then select it from Backtest Feed to inspect the Agent run step by step.</p>
+            <div className="empty-state large-empty-state">
+              <p>先创建一条回放记录，再从上方回放记录中选中它，这里就会展示逐步执行轨迹。</p>
             </div>
           ) : (
             <>
               <div className="trace-summary-strip">
-                <div className="info-box compact-box">
-                  <p>Run ID</p>
-                  <strong>{selectedBacktest.id}</strong>
-                </div>
-                <div className="info-box compact-box">
-                  <p>Status</p>
-                  <strong>{selectedBacktest.status}</strong>
-                </div>
-                <div className="info-box compact-box">
-                  <p>Steps Captured</p>
-                  <strong>{formatCount(backtestTraces.length)}</strong>
-                </div>
-                <div className="info-box compact-box">
-                  <p>Return</p>
-                  <strong>
-                    {typeof selectedBacktest.summary?.total_return_pct === 'number'
-                      ? formatPercent(Number(selectedBacktest.summary.total_return_pct))
-                      : '--'}
-                  </strong>
-                </div>
+                <MetricCard label="运行编号" value={selectedBacktest.id} detail="当前正在观察的回放实例" />
+                <MetricCard label="运行状态" value={describeStatus(selectedBacktest.status)} detail={describeScope(selectedBacktest.scope)} tone="accent" />
+                <MetricCard label="已捕获步骤" value={formatCount(backtestTraces.length)} detail="每个步骤都记录了推理摘要与工具调用" />
+                <MetricCard
+                  label="总收益"
+                  value={typeof selectedBacktest.summary?.total_return_pct === 'number'
+                    ? formatPercent(Number(selectedBacktest.summary.total_return_pct))
+                    : '--'}
+                  detail="回放汇总结果会在任务完成后更新"
+                  tone="warm"
+                />
               </div>
 
               <div className="info-box trace-hint-box">
                 <p>
                   {traceAutoRefresh
-                    ? 'Auto-refresh is active every 2.5 seconds while this backtest is queued or running.'
-                    : 'Trace capture is static now. Expand any step to inspect tool arguments and the final decision payload.'}
+                    ? '当前回放仍在排队或运行中，轨迹会每 2.5 秒自动刷新一次。'
+                    : '当前回放已静态完成，你可以展开任意步骤查看工具参数与完整决策 JSON。'}
                 </p>
               </div>
+
+              {selectedBacktest.error_message ? (
+                <div className="info-box warning-box">
+                  <p>{selectedBacktest.error_message}</p>
+                </div>
+              ) : null}
 
               {traceError ? (
                 <div className="info-box warning-box">
@@ -634,57 +904,53 @@ export default function App() {
 
               <div className="trace-list">
                 {!backtestTraces.length ? (
-                  <div className="info-box">
-                    <p>
-                      {traceAutoRefresh
-                        ? 'Backtest is running. Waiting for the first saved trace step...'
-                        : 'No trace steps are stored for this run yet.'}
-                    </p>
+                  <div className="empty-state large-empty-state">
+                    <p>{traceAutoRefresh ? '回放进行中，正在等待第一条轨迹落盘...' : '当前回放还没有保存任何执行步骤。'}</p>
                   </div>
                 ) : (
                   backtestTraces.map((trace) => {
+                    const rawAction = typeof trace.decision.action === 'string' ? trace.decision.action : 'skip';
                     const simulatedReturn = typeof trace.decision.simulated_return_pct === 'number'
                       ? Number(trace.decision.simulated_return_pct)
                       : null;
+
                     return (
                       <article className="trace-card" key={trace.id}>
                         <div className="trace-head">
                           <div>
-                            <p className="trace-step-label">Step {trace.trace_index + 1}</p>
+                            <p className="trace-step-label">第 {trace.trace_index + 1} 步</p>
                             <strong>{formatTime(trace.trigger_time)}</strong>
                           </div>
                           <div className="trace-pill-row">
-                            <span className={`status-chip action-chip action-${String(trace.decision.action ?? 'skip')}`}>
-                              {String(trace.decision.action ?? 'skip')}
-                            </span>
+                            <span className={`status-chip action-chip action-${rawAction}`}>{describeAction(rawAction)}</span>
                             {typeof trace.decision.symbol === 'string' ? (
-                              <span className="status-chip neutral-chip">{trace.decision.symbol}</span>
+                              <span className="status-chip chip-neutral">{trace.decision.symbol}</span>
                             ) : null}
-                            <span className="status-chip neutral-chip">{trace.tool_calls.length} tools</span>
+                            <span className="status-chip chip-neutral">{trace.tool_calls.length} 个工具</span>
                             {simulatedReturn !== null ? (
-                              <span className={`status-chip ${simulatedReturn >= 0 ? 'good-chip' : 'bad-chip'}`}>
+                              <span className={`status-chip ${simulatedReturn >= 0 ? 'chip-ok' : 'chip-error'}`}>
                                 {formatPercent(simulatedReturn)}
                               </span>
                             ) : null}
                           </div>
                         </div>
 
-                        <p className="trace-summary-text">{trace.reasoning_summary}</p>
+                        <p className="trace-summary-text">{trace.reasoning_summary || '本步骤未返回推理摘要。'}</p>
 
                         <div className="trace-meta-grid">
                           <div className="info-box compact-box">
-                            <p>Decision</p>
+                            <p>决策摘要</p>
                             <strong className="mini-metric">{summarizeDecision(trace.decision)}</strong>
                           </div>
                           <div className="info-box compact-box">
-                            <p>Tool Sequence</p>
+                            <p>工具序列</p>
                             <strong className="mini-metric">{summarizeToolSequence(trace.tool_calls)}</strong>
                           </div>
                         </div>
 
                         {trace.tool_calls.length ? (
                           <details className="trace-details">
-                            <summary>Tool calls</summary>
+                            <summary>查看工具调用</summary>
                             <div className="trace-details-body">
                               {trace.tool_calls.map((call, index) => (
                                 <div className="trace-tool-row" key={`${trace.id}-${call.tool_name}-${index}`}>
@@ -692,7 +958,7 @@ export default function App() {
                                     <strong>
                                       {index + 1}. {call.tool_name}
                                     </strong>
-                                    <span>{call.status}</span>
+                                    <span>{describeStatus(call.status)}</span>
                                   </div>
                                   <pre className="json-block">{formatJson(call.arguments)}</pre>
                                 </div>
@@ -702,7 +968,7 @@ export default function App() {
                         ) : null}
 
                         <details className="trace-details">
-                          <summary>Full decision JSON</summary>
+                          <summary>查看完整决策 JSON</summary>
                           <pre className="json-block">{formatJson(trace.decision)}</pre>
                         </details>
                       </article>
