@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradeskills.local/schemas/agent-decision.schema.json",
+  "title": "AgentDecision",
+  "type": "object",
+  "required": ["action", "reason", "size_pct"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "skip",
+        "watch",
+        "open_position",
+        "close_position",
+        "reduce_position",
+        "hold"
+      ]
+    },
+    "symbol": {
+      "type": ["string", "null"]
+    },
+    "direction": {
+      "type": ["string", "null"],
+      "enum": ["buy", "sell", null]
+    },
+    "size_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": {
+      "type": "string"
+    },
+    "stop_loss": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      }
+    },
+    "take_profit": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      }
+    },
+    "state_patch": {
+      "type": "object"
+    }
+  }
+}

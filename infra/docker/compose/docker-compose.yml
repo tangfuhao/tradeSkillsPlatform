@@ -1,0 +1,33 @@
+services:
+  agent-runner:
+    build:
+      context: ../../..
+      dockerfile: services/agent-runner/Dockerfile
+    env_file:
+      - ../../env/agent-runner.env.example
+    ports:
+      - "8100:8100"
+
+  api:
+    build:
+      context: ../../..
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - ../../env/api.env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../../data:/app/data
+    depends_on:
+      - agent-runner
+
+  web:
+    build:
+      context: ../../..
+      dockerfile: apps/web/Dockerfile
+    env_file:
+      - ../../env/web.env.example
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api

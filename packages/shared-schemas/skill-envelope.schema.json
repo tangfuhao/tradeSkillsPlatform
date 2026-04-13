@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradeskills.local/schemas/skill-envelope.schema.json",
+  "title": "SkillEnvelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "runtime_modes",
+    "trigger",
+    "tool_contract",
+    "output_contract",
+    "risk_contract",
+    "runtime_profile"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "runtime_modes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["backtest", "live_signal"]
+      },
+      "minItems": 1
+    },
+    "trigger": {
+      "type": "object",
+      "required": ["type", "value", "trigger_on"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "interval"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9]+[mhd]$"
+        },
+        "trigger_on": {
+          "type": "string",
+          "enum": ["bar_close", "wall_clock"]
+        },
+        "timezone": {
+          "type": "string"
+        }
+      }
+    },
+    "market_context": {
+      "type": "object"
+    },
+    "tool_contract": {
+      "type": "object",
+      "required": ["required_tools", "optional_tools"],
+      "properties": {
+        "required_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "output_contract": {
+      "type": "object",
+      "required": ["schema", "required_fields"],
+      "properties": {
+        "schema": {
+          "type": "string"
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "risk_contract": {
+      "type": "object",
+      "properties": {
+        "max_position_pct": {
+          "type": "number"
+        },
+        "requires_stop_loss": {
+          "type": "boolean"
+        },
+        "max_daily_loss_pct": {
+          "type": "number"
+        },
+        "max_concurrent_positions": {
+          "type": "integer"
+        },
+        "allow_hedging": {
+          "type": "boolean"
+        }
+      }
+    },
+    "state_contract": {
+      "type": "object"
+    },
+    "runtime_profile": {
+      "type": "object",
+      "required": ["needs_market_scan", "needs_python_sandbox"],
+      "properties": {
+        "needs_market_scan": {
+          "type": "boolean"
+        },
+        "needs_python_sandbox": {
+          "type": "boolean"
+        }
+      }
+    },
+    "extraction_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
