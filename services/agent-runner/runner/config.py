@@ -1,12 +1,16 @@
 import os
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     app_name: str = "TradeSkills Agent Runner"
     provider: str = "openai-tools"
+    allowed_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
+    )
     tool_gateway_timeout_seconds: float = float(os.getenv("AGENT_RUNNER_TOOL_GATEWAY_TIMEOUT_SECONDS") or 20.0)
     openai_api_key: str = os.getenv("AGENT_RUNNER_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
     openai_base_url: str = os.getenv("AGENT_RUNNER_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com"

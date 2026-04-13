@@ -123,10 +123,12 @@ Default local endpoints:
 - Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
 - The runner now calls the API's internal Tool Gateway over HTTP for `scan_market`, `get_candles`, `get_strategy_state`, `save_strategy_state`, `get_funding_rate`, and `get_open_interest`.
 - This removes the earlier preloaded `tool_context` dependency and makes the runner architecture closer to a real remote Agent runtime.
+- The Tool Gateway is now capability-layered into `market/*`, `state/*`, and `signal/*` internal handlers, while `/execute` remains as a compatibility dispatcher.
 - The current OpenAI-compatible provider used in local testing requires `stream=true` for `/v1/chat/completions`, so the runner uses a streamed tool loop internally.
 - If the LLM provider returns `429` or transient `5xx` errors, the runner retries with backoff and then falls back to the local heuristic engine so the platform still completes the run.
 - If your API runs on a non-default host or port, set `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL` so the runner callback URL points at the API process correctly.
 - Because your dev machine has a public IP, set `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET` to protect `/api/v1/internal/tool-gateway/execute`.
+- The web dashboard reads both API and runner health directly from the browser, so if you access the dashboard from another device you should set both `TRADE_SKILLS_ALLOWED_ORIGINS` and `AGENT_RUNNER_ALLOWED_ORIGINS` to include that web origin.
 
 ## Example environment variables
 
@@ -140,6 +142,13 @@ See `infra/env/api.env.example`, especially:
 - `TRADE_SKILLS_STARTUP_SYNC_TARGET_OFFSET_DAYS`
 - `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL`
 - `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET`
+
+See `infra/env/agent-runner.env.example`, especially:
+
+- `AGENT_RUNNER_ALLOWED_ORIGINS`
+- `AGENT_RUNNER_OPENAI_MODEL`
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
 
 ## Useful commands
 

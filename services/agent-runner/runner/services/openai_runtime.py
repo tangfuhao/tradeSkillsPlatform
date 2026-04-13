@@ -224,21 +224,13 @@ class ToolRuntime:
         }
 
     def _stage_trade_intent(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        staged = {
-            "action": arguments.get("action") or ("open_position" if tool_name == "simulate_order" else "watch"),
-            "symbol": self._resolve_market_symbol(arguments.get("symbol")) or arguments.get("symbol"),
-            "direction": arguments.get("direction"),
-            "size_pct": arguments.get("size_pct", 0.0),
-            "reason": arguments.get("reason") or f"Intent staged through {tool_name}.",
-        }
-        stop_loss_pct = arguments.get("stop_loss_pct")
-        take_profit_pct = arguments.get("take_profit_pct")
-        if stop_loss_pct is not None:
-            staged["stop_loss"] = {"type": "price_pct", "value": float(stop_loss_pct)}
-        if take_profit_pct is not None:
-            staged["take_profit"] = {"type": "price_pct", "value": float(take_profit_pct)}
+        request_arguments = dict(arguments)
+        if request_arguments.get("symbol"):
+            request_arguments["symbol"] = self._resolve_market_symbol(request_arguments.get("symbol")) or request_arguments.get("symbol")
+        response = self.gateway_client.execute(tool_name, request_arguments)
+        staged = dict((response.get("content") or {}).get("staged_decision", {}))
         self.staged_decision.update({key: value for key, value in staged.items() if value is not None})
-        return {"status": "staged", "content": {"staged_decision": dict(self.staged_decision)}}
+        return {"status": response.get("status", "staged"), "content": {"staged_decision": dict(self.staged_decision)}}
 
     def _candidate_for(self, market_symbol: str | None) -> dict[str, Any] | None:
         if not market_symbol:

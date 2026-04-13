@@ -125,6 +125,7 @@ def _build_tool_gateway_context(
     trace_index: int | None,
 ) -> dict[str, Any]:
     return {
+        "base_url": f"{settings.tool_gateway_base_url.rstrip('/')}{settings.api_prefix}/internal/tool-gateway",
         "execute_url": f"{settings.tool_gateway_base_url.rstrip('/')}{settings.api_prefix}/internal/tool-gateway/execute",
         "shared_secret": settings.tool_gateway_shared_secret,
         "skill_id": skill_id,

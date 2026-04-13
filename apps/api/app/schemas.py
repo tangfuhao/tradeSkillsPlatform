@@ -135,3 +135,43 @@ class ToolGatewayExecuteRequest(BaseModel):
 class ToolGatewayExecuteResponse(BaseModel):
     status: str
     content: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGatewayBaseRequest(BaseModel):
+    skill_id: str
+    mode: Literal["backtest", "live_signal"]
+    trigger_time: datetime
+    as_of: datetime | None = None
+    trace_index: int | None = None
+
+
+class ToolGatewayMarketScanRequest(ToolGatewayBaseRequest):
+    top_n: int = Field(default=8, ge=1, le=20)
+    sort_by: str = "volume_24h_usd"
+
+
+class ToolGatewayMarketSymbolRequest(ToolGatewayBaseRequest):
+    market_symbol: str = Field(min_length=1)
+
+
+class ToolGatewayMarketCandlesRequest(ToolGatewayMarketSymbolRequest):
+    timeframe: str = Field(min_length=1)
+    limit: int = Field(default=80, ge=1, le=200)
+
+
+class ToolGatewayStateGetRequest(ToolGatewayBaseRequest):
+    pass
+
+
+class ToolGatewayStateSaveRequest(ToolGatewayBaseRequest):
+    patch: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGatewaySignalIntentRequest(ToolGatewayBaseRequest):
+    action: str | None = None
+    symbol: str | None = None
+    direction: str | None = None
+    size_pct: float = 0.0
+    reason: str | None = None
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
