@@ -1,7 +1,7 @@
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
 
-.PHONY: api-install api-dev runner-install runner-dev web-install web-dev smoke-python smoke-web-json
+.PHONY: api-install api-dev runner-install runner-dev web-install web-dev dev-up dev-down dev-status smoke-python smoke-web-json
 
 api-install:
 	cd apps/api && $(PIP) install -r requirements.txt
@@ -20,6 +20,15 @@ web-install:
 
 web-dev:
 	cd apps/web && npm run dev -- --host 0.0.0.0 --port 5173
+
+dev-up:
+	./scripts/dev-up.sh
+
+dev-down:
+	./scripts/dev-down.sh
+
+dev-status:
+	./scripts/dev-status.sh
 
 smoke-python:
 	$(PYTHON) -m compileall apps/api/app services/agent-runner/runner

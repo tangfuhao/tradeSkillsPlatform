@@ -18,3 +18,4 @@ apps/web/package-lock.json
 data/runtime/*.db
 data/runtime/*.db-shm
 data/runtime/*.db-wal
+.dev/

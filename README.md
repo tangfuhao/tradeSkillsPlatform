@@ -105,6 +105,28 @@ Default local endpoints:
 - API: `http://localhost:8000`
 - Agent Runner: `http://localhost:8100`
 
+### One-command local startup
+
+If you prefer a single command for local debugging:
+
+```bash
+make dev-up
+```
+
+This will:
+
+- read `apps/api/.env`, `services/agent-runner/.env`, and `apps/web/.env.local`
+- start all three services in the background
+- write PID files under `.dev/pids`
+- write logs under `.dev/logs`
+
+Useful companion commands:
+
+```bash
+make dev-status
+make dev-down
+```
+
 ## Important API endpoints
 
 - `GET /api/v1/health`
