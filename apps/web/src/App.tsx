@@ -9,6 +9,7 @@ import {
   getApiBaseUrl,
   getApiHealth,
   getMarketOverview,
+  listBacktestTraces,
   listBacktests,
   listLiveTasks,
   listSignals,
@@ -18,12 +19,14 @@ import {
 } from './api';
 import type {
   BacktestRun,
+  BacktestTrace,
   LiveSignal,
   LiveTask,
   MarketOverview,
   ReviewStatus,
   ServicePulse,
   Skill,
+  ToolCall,
 } from './types';
 
 const defaultSkill = `# Short-Term Overheat Short Skill
@@ -68,11 +71,37 @@ function formatCount(value?: number | null): string {
   return new Intl.NumberFormat().format(value);
 }
 
+function formatPercent(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
+  return `${(value * 100).toFixed(2)}%`;
+}
+
 function describeReviewStatus(status?: ReviewStatus): string {
   if (status === 'approved_full_window') return 'approved for larger history windows';
   if (status === 'review_pending') return 'awaiting operator review';
   if (status === 'review_rejected') return 'rejected for extended history';
   return 'preview-ready for the default recent window';
+}
+
+function summarizeDecision(decision: Record<string, unknown>): string {
+  const action = typeof decision.action === 'string' ? decision.action : 'skip';
+  const symbol = typeof decision.symbol === 'string' ? decision.symbol : null;
+  const direction = typeof decision.direction === 'string' ? decision.direction : null;
+  const sizePct = typeof decision.size_pct === 'number' ? formatPercent(decision.size_pct) : null;
+  return [action, symbol, direction, sizePct].filter(Boolean).join(' / ');
+}
+
+function summarizeToolSequence(toolCalls: ToolCall[]): string {
+  if (!toolCalls.length) return 'No tool calls recorded';
+  return toolCalls.map((call) => call.tool_name).join(' -> ');
+}
+
+function formatJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function isBacktestActive(status?: string): boolean {
+  return status === 'queued' || status === 'running';
 }
 
 export default function App() {
@@ -85,6 +114,10 @@ export default function App() {
   const [marketOverview, setMarketOverview] = useState<MarketOverview | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState('');
+  const [selectedBacktestId, setSelectedBacktestId] = useState('');
+  const [backtestTraces, setBacktestTraces] = useState<BacktestTrace[]>([]);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState<string | null>(null);
   const [message, setMessage] = useState('Ready to orchestrate a Skill.');
   const [loading, setLoading] = useState(false);
   const [backtestStart, setBacktestStart] = useState(toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
@@ -99,8 +132,13 @@ export default function App() {
     () => liveTasks.find((task) => task.id === selectedTaskId) ?? liveTasks[0],
     [liveTasks, selectedTaskId],
   );
+  const selectedBacktest = useMemo(
+    () => backtests.find((run) => run.id === selectedBacktestId) ?? backtests[0],
+    [backtests, selectedBacktestId],
+  );
   const latestCsvJob = marketOverview?.recent_csv_jobs?.[0] ?? null;
   const skippedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'skipped').length ?? 0;
+  const traceAutoRefresh = isBacktestActive(selectedBacktest?.status);
 
   async function refreshDashboard() {
     const [apiHealth, runnerHealth, overview, nextSkills, nextBacktests, nextLiveTasks, nextSignals] = await Promise.all([
@@ -121,11 +159,35 @@ export default function App() {
     setBacktests(nextBacktests);
     setLiveTasks(nextLiveTasks);
     setSignals(nextSignals);
-    if (!selectedSkillId && nextSkills[0]) {
+
+    if (nextSkills[0] && !nextSkills.some((skill) => skill.id === selectedSkillId)) {
       setSelectedSkillId(nextSkills[0].id);
     }
-    if (!selectedTaskId && nextLiveTasks[0]) {
+    if (nextLiveTasks[0] && !nextLiveTasks.some((task) => task.id === selectedTaskId)) {
       setSelectedTaskId(nextLiveTasks[0].id);
+    }
+    if (nextBacktests[0] && !nextBacktests.some((run) => run.id === selectedBacktestId)) {
+      setSelectedBacktestId(nextBacktests[0].id);
+    }
+    if (!nextBacktests.length) {
+      setSelectedBacktestId('');
+    }
+  }
+
+  async function refreshTraceViewer(runId: string, silent = false) {
+    if (!silent) {
+      setTraceLoading(true);
+    }
+    try {
+      const traces = await listBacktestTraces(runId);
+      setBacktestTraces(traces);
+      setTraceError(null);
+    } catch (error) {
+      setTraceError(`Trace fetch failed: ${String(error)}`);
+    } finally {
+      if (!silent) {
+        setTraceLoading(false);
+      }
     }
   }
 
@@ -134,6 +196,29 @@ export default function App() {
       setMessage(`Bootstrap check failed: ${String(error)}`);
     });
   }, []);
+
+  useEffect(() => {
+    if (!selectedBacktest?.id) {
+      setBacktestTraces([]);
+      setTraceError(null);
+      return;
+    }
+    refreshTraceViewer(selectedBacktest.id).catch((error) => {
+      setTraceError(`Trace fetch failed: ${String(error)}`);
+    });
+  }, [selectedBacktest?.id]);
+
+  useEffect(() => {
+    if (!selectedBacktest?.id || !traceAutoRefresh) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      Promise.all([refreshDashboard(), refreshTraceViewer(selectedBacktest.id, true)]).catch((error) => {
+        setTraceError(`Trace refresh failed: ${String(error)}`);
+      });
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [selectedBacktest?.id, traceAutoRefresh]);
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -166,7 +251,10 @@ export default function App() {
         end_time: new Date(backtestEnd).toISOString(),
         initial_capital: initialCapital,
       });
-      setMessage(`Backtest ${created.id} is queued. Refreshing the activity feed...`);
+      setSelectedBacktestId(created.id);
+      setBacktestTraces([]);
+      setTraceError(null);
+      setMessage(`Backtest ${created.id} is queued. Trace Viewer will auto-refresh while it runs.`);
       await refreshDashboard();
     } catch (error) {
       setMessage(`Backtest creation failed: ${String(error)}`);
@@ -425,7 +513,12 @@ export default function App() {
           </div>
           <div className="list-shell">
             {skills.map((skill) => (
-              <button className="list-card" key={skill.id} type="button" onClick={() => setSelectedSkillId(skill.id)}>
+              <button
+                className={`list-card ${selectedSkill?.id === skill.id ? 'selected-card' : ''}`}
+                key={skill.id}
+                type="button"
+                onClick={() => setSelectedSkillId(skill.id)}
+              >
                 <strong>{skill.title}</strong>
                 <span>{describeReviewStatus(skill.review_status)}</span>
                 <small>{skill.envelope?.trigger?.value ?? '--'} cadence</small>
@@ -437,6 +530,7 @@ export default function App() {
         <article className="panel">
           <div className="panel-header">
             <h2>Backtest Feed</h2>
+            <span>Pick one to inspect its trace</span>
           </div>
           <div className="list-shell">
             {backtests.map((run) => {
@@ -444,13 +538,18 @@ export default function App() {
                 ? `${(Number(run.summary.total_return_pct) * 100).toFixed(2)}%`
                 : 'Waiting for summary';
               return (
-                <div className="list-card static" key={run.id}>
+                <button
+                  className={`list-card ${selectedBacktest?.id === run.id ? 'selected-card' : ''}`}
+                  key={run.id}
+                  type="button"
+                  onClick={() => setSelectedBacktestId(run.id)}
+                >
                   <strong>{run.id}</strong>
                   <span>
                     {run.status} / {run.scope}
                   </span>
                   <small>{totalReturnPct}</small>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -471,6 +570,148 @@ export default function App() {
               </div>
             ))}
           </div>
+        </article>
+      </section>
+
+      <section className="grid">
+        <article className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Execution Trace</h2>
+              <span>Observe each replay trigger, tool sequence, and structured decision.</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => selectedBacktest?.id && refreshTraceViewer(selectedBacktest.id)}
+              disabled={!selectedBacktest?.id || traceLoading}
+            >
+              {traceLoading ? 'Loading...' : 'Refresh Trace'}
+            </button>
+          </div>
+
+          {!selectedBacktest ? (
+            <div className="info-box">
+              <p>Create a backtest first, then select it from Backtest Feed to inspect the Agent run step by step.</p>
+            </div>
+          ) : (
+            <>
+              <div className="trace-summary-strip">
+                <div className="info-box compact-box">
+                  <p>Run ID</p>
+                  <strong>{selectedBacktest.id}</strong>
+                </div>
+                <div className="info-box compact-box">
+                  <p>Status</p>
+                  <strong>{selectedBacktest.status}</strong>
+                </div>
+                <div className="info-box compact-box">
+                  <p>Steps Captured</p>
+                  <strong>{formatCount(backtestTraces.length)}</strong>
+                </div>
+                <div className="info-box compact-box">
+                  <p>Return</p>
+                  <strong>
+                    {typeof selectedBacktest.summary?.total_return_pct === 'number'
+                      ? formatPercent(Number(selectedBacktest.summary.total_return_pct))
+                      : '--'}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="info-box trace-hint-box">
+                <p>
+                  {traceAutoRefresh
+                    ? 'Auto-refresh is active every 2.5 seconds while this backtest is queued or running.'
+                    : 'Trace capture is static now. Expand any step to inspect tool arguments and the final decision payload.'}
+                </p>
+              </div>
+
+              {traceError ? (
+                <div className="info-box warning-box">
+                  <p>{traceError}</p>
+                </div>
+              ) : null}
+
+              <div className="trace-list">
+                {!backtestTraces.length ? (
+                  <div className="info-box">
+                    <p>
+                      {traceAutoRefresh
+                        ? 'Backtest is running. Waiting for the first saved trace step...'
+                        : 'No trace steps are stored for this run yet.'}
+                    </p>
+                  </div>
+                ) : (
+                  backtestTraces.map((trace) => {
+                    const simulatedReturn = typeof trace.decision.simulated_return_pct === 'number'
+                      ? Number(trace.decision.simulated_return_pct)
+                      : null;
+                    return (
+                      <article className="trace-card" key={trace.id}>
+                        <div className="trace-head">
+                          <div>
+                            <p className="trace-step-label">Step {trace.trace_index + 1}</p>
+                            <strong>{formatTime(trace.trigger_time)}</strong>
+                          </div>
+                          <div className="trace-pill-row">
+                            <span className={`status-chip action-chip action-${String(trace.decision.action ?? 'skip')}`}>
+                              {String(trace.decision.action ?? 'skip')}
+                            </span>
+                            {typeof trace.decision.symbol === 'string' ? (
+                              <span className="status-chip neutral-chip">{trace.decision.symbol}</span>
+                            ) : null}
+                            <span className="status-chip neutral-chip">{trace.tool_calls.length} tools</span>
+                            {simulatedReturn !== null ? (
+                              <span className={`status-chip ${simulatedReturn >= 0 ? 'good-chip' : 'bad-chip'}`}>
+                                {formatPercent(simulatedReturn)}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <p className="trace-summary-text">{trace.reasoning_summary}</p>
+
+                        <div className="trace-meta-grid">
+                          <div className="info-box compact-box">
+                            <p>Decision</p>
+                            <strong className="mini-metric">{summarizeDecision(trace.decision)}</strong>
+                          </div>
+                          <div className="info-box compact-box">
+                            <p>Tool Sequence</p>
+                            <strong className="mini-metric">{summarizeToolSequence(trace.tool_calls)}</strong>
+                          </div>
+                        </div>
+
+                        {trace.tool_calls.length ? (
+                          <details className="trace-details">
+                            <summary>Tool calls</summary>
+                            <div className="trace-details-body">
+                              {trace.tool_calls.map((call, index) => (
+                                <div className="trace-tool-row" key={`${trace.id}-${call.tool_name}-${index}`}>
+                                  <div className="trace-tool-head">
+                                    <strong>
+                                      {index + 1}. {call.tool_name}
+                                    </strong>
+                                    <span>{call.status}</span>
+                                  </div>
+                                  <pre className="json-block">{formatJson(call.arguments)}</pre>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        ) : null}
+
+                        <details className="trace-details">
+                          <summary>Full decision JSON</summary>
+                          <pre className="json-block">{formatJson(trace.decision)}</pre>
+                        </details>
+                      </article>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
         </article>
       </section>
     </div>

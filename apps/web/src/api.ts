@@ -53,6 +53,10 @@ export async function listBacktests(): Promise<any[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`);
 }
 
+export async function listBacktestTraces(runId: string): Promise<any[]> {
+  return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/traces`);
+}
+
 export async function createBacktest(payload: { skill_id: string; start_time: string; end_time: string; initial_capital: number }): Promise<any> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`, {
     method: 'POST',

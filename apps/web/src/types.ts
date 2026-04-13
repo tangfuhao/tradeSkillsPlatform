@@ -52,6 +52,21 @@ export type BacktestRun = {
   updated_at: string;
 };
 
+export type ToolCall = {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  status: string;
+};
+
+export type BacktestTrace = {
+  id: string;
+  trace_index: number;
+  trigger_time: string;
+  reasoning_summary: string;
+  decision: Record<string, unknown>;
+  tool_calls: ToolCall[];
+};
+
 export type LiveTask = {
   id: string;
   skill_id: string;
