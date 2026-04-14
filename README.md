@@ -176,6 +176,7 @@ The current backtest and live runtime share the same `PortfolioEngine` model:
 - Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
 - The runner calls the API's internal Tool Gateway over HTTP for market, state, portfolio, and signal-staging operations.
 - The current toolset includes `scan_market`, `get_market_metadata`, `get_candles`, `compute_indicators`, `get_funding_rate`, `get_open_interest`, `get_strategy_state`, `save_strategy_state`, `get_portfolio_state`, `simulate_order`, `emit_signal`, and `python_exec`.
+- For a detailed runtime tool catalog, execution notes, and Chinese case-by-case walkthroughs, see [the agent tools guide](docs/agent-tools.zh-CN.md).
 - The runner currently uses the OpenAI Responses API tool loop, not the older chat-completions flow.
 - If the model returns a non-JSON final answer after tool use, the runtime fails closed to a `skip` decision instead of applying an unstructured action.
 - If your API runs on a non-default host or port, set `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL` so the runner callback URL points at the API process correctly.
