@@ -145,6 +145,7 @@ make dev-down
 - The Agent Runner now reads raw Skill Markdown, lets the LLM call local tools, and returns a structured decision payload.
 - Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
 - The runner now calls the API's internal Tool Gateway over HTTP for `scan_market`, `get_candles`, `get_strategy_state`, `save_strategy_state`, `get_funding_rate`, and `get_open_interest`.
+- For a detailed runtime tool catalog, execution notes, and Chinese case-by-case walkthroughs, see [the agent tools guide](docs/agent-tools.zh-CN.md).
 - This removes the earlier preloaded `tool_context` dependency and makes the runner architecture closer to a real remote Agent runtime.
 - The Tool Gateway is now capability-layered into `market/*`, `state/*`, and `signal/*` internal handlers, while `/execute` remains as a compatibility dispatcher.
 - The current OpenAI-compatible provider used in local testing requires `stream=true` for `/v1/chat/completions`, so the runner uses a streamed tool loop internally.
