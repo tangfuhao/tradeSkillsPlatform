@@ -4,15 +4,16 @@ import io
 import json
 import math
 import statistics
-import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
+from openai import OpenAI
 
 from runner.config import settings
 from runner.schemas import AgentDecision, ExecuteRunRequest, ExecuteRunResponse, RiskTarget, ToolCallSummary
+from runner.services.model_routing import get_responses_client
+from runner.services.responses_payload_builder import build_responses_request_payload
 from runner.services.tool_gateway_client import ToolGatewayClient
 
 
@@ -21,58 +22,67 @@ DEFAULT_TAKE_PROFIT_PCT = 0.10
 
 
 @dataclass(slots=True)
+class StreamRoundResult:
+    output_text: str
+    output_items: list[dict[str, Any]]
+    function_calls: list[dict[str, Any]]
+
+
+@dataclass(slots=True)
 class OpenAIToolDecisionEngine:
     provider: str = "openai-tools"
 
     def execute(self, payload: ExecuteRunRequest) -> ExecuteRunResponse:
         runtime = ToolRuntime(payload)
-        messages = _build_messages(payload)
+        conversation_items = _build_prompt_input_items(payload)
         tool_summaries: list[ToolCallSummary] = []
+        client = get_responses_client(settings.openai_model)
 
-        with httpx.Client(timeout=settings.openai_timeout_seconds) as client:
-            for _ in range(settings.openai_max_tool_rounds):
-                completion = _create_chat_completion(client, messages)
-                choice = completion["choices"][0]["message"]
-                tool_calls = choice.get("tool_calls") or []
-                if tool_calls:
-                    messages.append(
+        for _ in range(settings.openai_max_tool_rounds):
+            round_result = _stream_response_round(client, conversation_items=conversation_items)
+            if round_result.function_calls:
+                function_outputs: list[dict[str, Any]] = []
+                for call in round_result.function_calls:
+                    call_name = str(call.get("name") or "")
+                    raw_arguments = str(call.get("arguments") or "{}")
+                    arguments = _parse_json_object(raw_arguments)
+                    result = runtime.execute_tool(call_name, arguments)
+                    tool_summaries.append(
+                        ToolCallSummary(
+                            tool_name=call_name,
+                            arguments=arguments,
+                            status=result.get("status", "executed"),
+                        )
+                    )
+                    function_outputs.append(
                         {
-                            "role": "assistant",
-                            "content": choice.get("content") or "",
-                            "tool_calls": tool_calls,
+                            "type": "function_call_output",
+                            "call_id": call.get("call_id"),
+                            "output": json.dumps(result.get("content", {}), ensure_ascii=False),
                         }
                     )
-                    for call in tool_calls:
-                        call_name = call["function"]["name"]
-                        raw_arguments = call["function"].get("arguments") or "{}"
-                        arguments = _parse_json_object(raw_arguments)
-                        result = runtime.execute_tool(call_name, arguments)
-                        tool_summaries.append(
-                            ToolCallSummary(
-                                tool_name=call_name,
-                                arguments=arguments,
-                                status=result.get("status", "executed"),
-                            )
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call["id"],
-                                "content": json.dumps(result.get("content", {}), ensure_ascii=False),
-                            }
-                        )
-                    continue
+                conversation_items.extend(round_result.output_items)
+                conversation_items.extend(function_outputs)
+                continue
 
-                final_payload = _parse_final_payload(choice.get("content") or "")
-                decision_payload = final_payload.get("decision", final_payload)
-                reasoning_summary = final_payload.get("reasoning_summary") or _default_reasoning_summary(tool_summaries)
-                decision = _sanitize_decision(payload, runtime, decision_payload)
-                return ExecuteRunResponse(
-                    decision=decision,
-                    reasoning_summary=reasoning_summary,
-                    tool_calls=tool_summaries,
+            try:
+                final_payload = _parse_final_payload(round_result.output_text)
+            except ValueError:
+                return _fallback_non_json_response(
+                    runtime,
+                    tool_summaries=tool_summaries,
+                    raw_output=round_result.output_text,
                     provider=self.provider,
                 )
+            decision_payload = final_payload.get("decision", final_payload)
+            reasoning_summary = final_payload.get("reasoning_summary") or _default_reasoning_summary(tool_summaries)
+            decision = _sanitize_decision(payload, runtime, decision_payload)
+            return ExecuteRunResponse(
+                decision=decision,
+                reasoning_summary=reasoning_summary,
+                tool_calls=tool_summaries,
+                provider=self.provider,
+            )
 
         raise RuntimeError("LLM tool loop exceeded the configured maximum number of rounds.")
 
@@ -90,6 +100,8 @@ class ToolRuntime:
     def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "scan_market":
             return self._scan_market(arguments)
+        if tool_name == "get_portfolio_state":
+            return self._get_portfolio_state()
         if tool_name == "get_strategy_state":
             return self._get_strategy_state()
         if tool_name == "save_strategy_state":
@@ -115,6 +127,9 @@ class ToolRuntime:
 
     def _scan_market(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.gateway_client.execute("scan_market", arguments)
+
+    def _get_portfolio_state(self) -> dict[str, Any]:
+        return self.gateway_client.execute("get_portfolio_state", {})
 
     def _compute_indicators(self, arguments: dict[str, Any]) -> dict[str, Any]:
         market_symbol = self._resolve_market_symbol(arguments.get("market_symbol")) or ""
@@ -320,7 +335,7 @@ class ToolRuntime:
         return symbol
 
 
-def _build_messages(payload: ExecuteRunRequest) -> list[dict[str, Any]]:
+def _build_prompt_text(payload: ExecuteRunRequest) -> str:
     market_candidates = payload.context.get("market_candidates", [])[:8]
     compact_candidates = [
         {
@@ -335,31 +350,39 @@ def _build_messages(payload: ExecuteRunRequest) -> list[dict[str, Any]]:
         for item in market_candidates
     ]
     tool_gateway = payload.context.get("tool_gateway", {}) if isinstance(payload.context, dict) else {}
+    portfolio_summary = payload.context.get("portfolio_summary", {}) if isinstance(payload.context, dict) else {}
+    return (
+        "You are running one trigger cycle for a trading Skill.\n\n"
+        f"Mode: {payload.mode}\n"
+        f"Trigger time (UTC): {payload.trigger_time.isoformat()}\n"
+        f"Trigger time ms: {payload.trigger_time_ms}\n"
+        f"Skill title: {payload.skill_title or payload.skill_id or 'Unnamed Skill'}\n\n"
+        "Skill text:\n"
+        f"{payload.skill_text}\n\n"
+        "Extracted envelope:\n"
+        f"{json.dumps(payload.envelope, ensure_ascii=False)}\n\n"
+        "Current compact market scan context:\n"
+        f"{json.dumps(compact_candidates, ensure_ascii=False)}\n\n"
+        "Tool gateway summary:\n"
+        f"{json.dumps({
+            'enabled': bool(tool_gateway),
+            'as_of_ms': payload.context.get('as_of_ms'),
+            'provider': payload.context.get('provider') or payload.context.get('source'),
+            'market_candidate_count': len(payload.context.get('market_candidates', [])),
+            'trace_index': tool_gateway.get('trace_index'),
+        }, ensure_ascii=False)}\n\n"
+        "Current portfolio hint:\n"
+        f"{json.dumps(portfolio_summary, ensure_ascii=False)}"
+    )
+
+
+def _build_prompt_input_items(payload: ExecuteRunRequest) -> list[dict[str, Any]]:
     return [
-        {"role": "system", "content": _system_prompt()},
         {
+            "type": "message",
             "role": "user",
-            "content": (
-                "You are running one trigger cycle for a trading Skill.\n\n"
-                f"Mode: {payload.mode}\n"
-                f"Trigger time: {payload.trigger_time.isoformat()}\n"
-                f"Skill title: {payload.skill_title or payload.skill_id or 'Unnamed Skill'}\n\n"
-                "Skill text:\n"
-                f"{payload.skill_text}\n\n"
-                "Extracted envelope:\n"
-                f"{json.dumps(payload.envelope, ensure_ascii=False)}\n\n"
-                "Current compact market scan context:\n"
-                f"{json.dumps(compact_candidates, ensure_ascii=False)}\n\n"
-                "Tool gateway summary:\n"
-                f"{json.dumps({
-                    'enabled': bool(tool_gateway),
-                    'as_of': payload.context.get('as_of'),
-                    'provider': payload.context.get('provider') or payload.context.get('source'),
-                    'market_candidate_count': len(payload.context.get('market_candidates', [])),
-                    'trace_index': tool_gateway.get('trace_index'),
-                }, ensure_ascii=False)}"
-            ),
-        },
+            "content": [{"type": "input_text", "text": _build_prompt_text(payload)}],
+        }
     ]
 
 
@@ -368,12 +391,15 @@ def _system_prompt() -> str:
         "You are the execution runtime for a natural-language trading Skill. "
         "Your job is to read the Skill, inspect tool data, and return one structured trade decision for this trigger.\n\n"
         "Rules:\n"
-        "1. Use tools to inspect market context before finalizing a decision. Prefer scan_market, get_strategy_state, and compute_indicators. Use get_candles only when you truly need raw bars. Use python_exec only for custom calculations that the built-in tools cannot cover.\n"
+        "1. Use tools to inspect market context before finalizing a decision. Prefer scan_market, get_portfolio_state, get_strategy_state, and compute_indicators. Use get_candles only when you truly need raw bars. Use python_exec only for custom calculations that the built-in tools cannot cover.\n"
         "2. Respect the risk contract. Do not exceed max_position_pct. If a setup is unclear, choose skip or watch.\n"
         "3. If the Skill is short-biased, prefer sell direction when opening a position.\n"
-        "4. When open_position is chosen, include stop_loss and take_profit as {\"type\": \"price_pct\", \"value\": number}.\n"
-        "5. If you call save_strategy_state, the final decision.state_patch should still include the relevant patch.\n"
-        "6. Final answer must be JSON only, with this shape:\n"
+        "4. If there are existing positions, unrealized PnL, or partial exits to consider, call get_portfolio_state before deciding whether to hold, reduce, or close.\n"
+        "5. stop_loss and take_profit are metadata only in v1; they do not auto-trigger. The engine executes close_position or reduce_position only when you explicitly choose them.\n"
+        "6. When open_position is chosen, include stop_loss and take_profit as {\"type\": \"price_pct\", \"value\": number}.\n"
+        "7. close_position closes the full current position for the symbol and ignores size_pct. reduce_position uses size_pct as a ratio of the current position size, not of account equity.\n"
+        "8. If you call save_strategy_state, the final decision.state_patch should still include the relevant patch.\n"
+        "9. Final answer must be JSON only, with this shape:\n"
         "{\n"
         '  "reasoning_summary": "short summary of the execution plan and why the final decision was made",\n'
         '  "decision": {\n'
@@ -387,9 +413,11 @@ def _system_prompt() -> str:
         '    "state_patch": {}\n'
         "  }\n"
         "}\n"
-        "7. Keep tool usage minimal. In most cases you should finish within 3 to 4 tool calls.\n"
-        "8. If you use python_exec, do not write import statements. Use the built-in helpers instead.\n"
-        "9. Do not include markdown code fences in the final answer."
+        "10. Keep tool usage minimal. In most cases you should finish within 3 to 4 tool calls.\n"
+        "11. If you use python_exec, do not write import statements. Use the built-in helpers instead.\n"
+        "12. Do not include markdown code fences in the final answer.\n"
+        "13. This runtime is used for backtests, paper trading, and user-authorized live execution. "
+        "Do not refuse solely because the request involves market analysis or a simulated trade decision."
     )
 
 
@@ -397,276 +425,308 @@ def _tool_definitions() -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
-            "function": {
-                "name": "scan_market",
-                "description": "Return the current ranked market candidates available for this trigger.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "top_n": {"type": "integer", "minimum": 1, "maximum": 20},
-                        "sort_by": {"type": "string"},
-                    },
+            "name": "scan_market",
+            "description": "Return the current ranked market candidates available for this trigger.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_n": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "sort_by": {"type": "string"},
                 },
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "get_strategy_state",
-                "description": "Read the externalized strategy state for this Skill.",
-                "parameters": {"type": "object", "properties": {}},
+            "name": "get_portfolio_state",
+            "description": "Read the official execution-scoped portfolio, including cash, equity, realized and unrealized PnL, open positions, and recent fills.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        {
+            "type": "function",
+            "name": "get_strategy_state",
+            "description": "Read the externalized strategy state for this Skill.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        {
+            "type": "function",
+            "name": "save_strategy_state",
+            "description": "Stage a partial strategy state patch that should be persisted after this trigger completes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "object"},
+                },
+                "required": ["patch"],
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "save_strategy_state",
-                "description": "Stage a partial strategy state patch that should be persisted after this trigger completes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "patch": {"type": "object"},
-                    },
-                    "required": ["patch"],
+            "name": "get_market_metadata",
+            "description": "Inspect metadata about a candidate symbol and the remote tool-gateway context for this run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "market_symbol": {"type": "string"},
                 },
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "get_market_metadata",
-                "description": "Inspect metadata about a candidate symbol and the remote tool-gateway context for this run.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "market_symbol": {"type": "string"},
-                    },
+            "name": "get_candles",
+            "description": "Fetch OHLCV candles for a symbol and timeframe through the remote Tool Gateway. Prefer compute_indicators for EMA, RSI, ATR, or SMA unless you really need raw bars.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "market_symbol": {"type": "string"},
+                    "timeframe": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["market_symbol", "timeframe"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "compute_indicators",
+            "description": "Compute common technical indicators from candles fetched through the Tool Gateway. Prefer this over python_exec for EMA, SMA, RSI, or ATR.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "market_symbol": {"type": "string"},
+                    "timeframe": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 240},
+                    "ema_periods": {"type": "array", "items": {"type": "integer"}},
+                    "sma_periods": {"type": "array", "items": {"type": "integer"}},
+                    "rsi_periods": {"type": "array", "items": {"type": "integer"}},
+                    "atr_periods": {"type": "array", "items": {"type": "integer"}},
+                },
+                "required": ["market_symbol", "timeframe"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "get_funding_rate",
+            "description": "Return the currently available funding-rate snapshot for a candidate symbol.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "market_symbol": {"type": "string"},
+                },
+                "required": ["market_symbol"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "get_open_interest",
+            "description": "Return the currently available open-interest change snapshot for a candidate symbol.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "market_symbol": {"type": "string"},
+                },
+                "required": ["market_symbol"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "python_exec",
+            "description": (
+                "Run a small pure-Python calculation with helper functions load_candles(symbol, timeframe, limit=None), "
+                "ema(values, period), sma(values, period), rsi(values, period), atr(candles, period). "
+                "Do not use import statements. Set a variable named result if you want structured output."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "code": {"type": "string"},
+                },
+                "required": ["code"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "simulate_order",
+            "description": "Stage a simulated trade intent before producing the final structured decision.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    "direction": {"type": "string"},
+                    "size_pct": {"type": "number"},
+                    "reason": {"type": "string"},
+                    "stop_loss_pct": {"type": "number"},
+                    "take_profit_pct": {"type": "number"},
                 },
             },
         },
         {
             "type": "function",
-            "function": {
-                "name": "get_candles",
-                "description": "Fetch OHLCV candles for a symbol and timeframe through the remote Tool Gateway. Prefer compute_indicators for EMA, RSI, ATR, or SMA unless you really need raw bars.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "market_symbol": {"type": "string"},
-                        "timeframe": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                    },
-                    "required": ["market_symbol", "timeframe"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "compute_indicators",
-                "description": "Compute common technical indicators from candles fetched through the Tool Gateway. Prefer this over python_exec for EMA, SMA, RSI, or ATR.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "market_symbol": {"type": "string"},
-                        "timeframe": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 240},
-                        "ema_periods": {"type": "array", "items": {"type": "integer"}},
-                        "sma_periods": {"type": "array", "items": {"type": "integer"}},
-                        "rsi_periods": {"type": "array", "items": {"type": "integer"}},
-                        "atr_periods": {"type": "array", "items": {"type": "integer"}},
-                    },
-                    "required": ["market_symbol", "timeframe"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_funding_rate",
-                "description": "Return the currently available funding-rate snapshot for a candidate symbol.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "market_symbol": {"type": "string"},
-                    },
-                    "required": ["market_symbol"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_open_interest",
-                "description": "Return the currently available open-interest change snapshot for a candidate symbol.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "market_symbol": {"type": "string"},
-                    },
-                    "required": ["market_symbol"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "python_exec",
-                "description": (
-                    "Run a small pure-Python calculation with helper functions load_candles(symbol, timeframe, limit=None), "
-                    "ema(values, period), sma(values, period), rsi(values, period), atr(candles, period). "
-                    "Do not use import statements. Set a variable named result if you want structured output."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "description": {"type": "string"},
-                        "code": {"type": "string"},
-                    },
-                    "required": ["code"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "simulate_order",
-                "description": "Stage a simulated trade intent before producing the final structured decision.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string"},
-                        "symbol": {"type": "string"},
-                        "direction": {"type": "string"},
-                        "size_pct": {"type": "number"},
-                        "reason": {"type": "string"},
-                        "stop_loss_pct": {"type": "number"},
-                        "take_profit_pct": {"type": "number"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "emit_signal",
-                "description": "Stage a structured live signal intent before producing the final response.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string"},
-                        "symbol": {"type": "string"},
-                        "direction": {"type": "string"},
-                        "size_pct": {"type": "number"},
-                        "reason": {"type": "string"},
-                        "stop_loss_pct": {"type": "number"},
-                        "take_profit_pct": {"type": "number"},
-                    },
+            "name": "emit_signal",
+            "description": "Stage a structured live signal intent before producing the final response.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    "direction": {"type": "string"},
+                    "size_pct": {"type": "number"},
+                    "reason": {"type": "string"},
+                    "stop_loss_pct": {"type": "number"},
+                    "take_profit_pct": {"type": "number"},
                 },
             },
         },
     ]
 
 
-def _create_chat_completion(client: httpx.Client, messages: list[dict[str, Any]]) -> dict[str, Any]:
-    request_payload = {
-        "model": settings.openai_model,
-        "messages": messages,
-        "tools": _tool_definitions(),
-        "tool_choice": "auto",
-        "temperature": settings.openai_temperature,
-        "stream": True,
-    }
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    for attempt in range(settings.openai_max_retries + 1):
-        try:
-            with client.stream(
-                "POST",
-                _chat_completions_url(),
-                headers=headers,
-                json=request_payload,
-            ) as response:
-                response.raise_for_status()
-                return _collect_streamed_completion(response)
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            should_retry = status_code == 429 or status_code >= 500
-            if not should_retry or attempt >= settings.openai_max_retries:
-                raise
-            time.sleep(_retry_delay_seconds(exc.response, attempt))
-    raise RuntimeError("OpenAI-compatible request exhausted retries without a response.")
+def _stream_response_round(
+    client: OpenAI,
+    *,
+    conversation_items: list[dict[str, Any]],
+) -> StreamRoundResult:
+    if settings.openai_wire_api != "responses":
+        raise RuntimeError(f"Unsupported wire API: {settings.openai_wire_api}")
+
+    request_payload = build_responses_request_payload(
+        model_name=settings.openai_model,
+        conversation_items=conversation_items,
+        system_prompt=_system_prompt(),
+        tools=_tool_definitions(),
+        stream=True,
+    )
+
+    output_text_parts: list[str] = []
+    output_items: list[dict[str, Any]] = []
+    function_calls_by_item_id: dict[str, dict[str, Any]] = {}
+    message_text_keys: set[str] = set()
+    finalized_output_item_ids: set[str] = set()
+
+    with client.responses.with_streaming_response.create(**request_payload) as response:
+        for line in response.iter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            payload = line[6:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            event = json.loads(payload)
+            event_type = str(_event_field(event, "type") or "")
+            if event_type == "response.output_item.added":
+                item = _event_field(event, "item")
+                item_dict = _to_dict(item)
+                if item_dict.get("type") == "function_call":
+                    item_id = str(item_dict.get("id") or "")
+                    if item_id:
+                        function_calls_by_item_id[item_id] = item_dict
+                continue
+
+            if event_type == "response.function_call_arguments.delta":
+                item_id = str(_event_field(event, "item_id") or "")
+                delta = str(_event_field(event, "delta") or "")
+                if not item_id or not delta:
+                    continue
+                call = function_calls_by_item_id.setdefault(item_id, {"type": "function_call", "id": item_id, "arguments": ""})
+                call["arguments"] = f"{call.get('arguments', '')}{delta}"
+                call_id = str(_event_field(event, "call_id") or "")
+                if call_id:
+                    call["call_id"] = call_id
+                continue
+
+            if event_type == "response.function_call_arguments.done":
+                item_id = str(_event_field(event, "item_id") or "")
+                if not item_id:
+                    continue
+                call = function_calls_by_item_id.setdefault(item_id, {"type": "function_call", "id": item_id})
+                arguments = str(_event_field(event, "arguments") or "")
+                if arguments:
+                    call["arguments"] = arguments
+                continue
+
+            if event_type == "response.output_text.delta":
+                delta = str(_event_field(event, "delta") or "")
+                if not delta:
+                    continue
+                item_id = str(_event_field(event, "item_id") or "")
+                content_index = _event_field(event, "content_index")
+                if item_id and content_index is not None:
+                    message_text_keys.add(f"{item_id}:{content_index}")
+                output_text_parts.append(delta)
+                continue
+
+            if event_type == "response.output_text.done":
+                text = str(_event_field(event, "text") or "")
+                if not text:
+                    continue
+                item_id = str(_event_field(event, "item_id") or "")
+                content_index = _event_field(event, "content_index")
+                if item_id and content_index is not None and f"{item_id}:{content_index}" in message_text_keys:
+                    continue
+                output_text_parts.append(text)
+                continue
+
+            if event_type == "response.output_item.done":
+                item = _event_field(event, "item")
+                item_dict = _to_dict(item)
+                item_id = str(item_dict.get("id") or "")
+                item_type = str(item_dict.get("type") or "")
+                if item_type == "function_call":
+                    merged = dict(function_calls_by_item_id.get(item_id, {}))
+                    merged.update(item_dict)
+                    if item_id:
+                        function_calls_by_item_id[item_id] = merged
+                    if not item_id or item_id not in finalized_output_item_ids:
+                        output_items.append(merged)
+                        if item_id:
+                            finalized_output_item_ids.add(item_id)
+                    continue
+
+                if item_type == "message":
+                    if not item_id or item_id not in finalized_output_item_ids:
+                        output_items.append(item_dict)
+                        if item_id:
+                            finalized_output_item_ids.add(item_id)
+                    for index, part in enumerate(item_dict.get("content") or []):
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") != "output_text":
+                            continue
+                        text = str(part.get("text") or "")
+                        if not text:
+                            continue
+                        if item_id and f"{item_id}:{index}" in message_text_keys:
+                            continue
+                        output_text_parts.append(text)
+                    continue
+
+            if event_type == "error":
+                raise RuntimeError(str(_event_field(event, "error") or "Responses API stream failed."))
+
+    function_calls = [item for item in output_items if item.get("type") == "function_call"]
+    output_text = "".join(output_text_parts).strip()
+    if function_calls or output_text:
+        return StreamRoundResult(
+            output_text=output_text,
+            output_items=output_items,
+            function_calls=function_calls,
+        )
+    raise RuntimeError("Responses API stream ended without assistant text or function calls.")
 
 
-def _chat_completions_url() -> str:
-    base_url = settings.openai_base_url.rstrip("/")
-    if not base_url.endswith("/v1"):
-        base_url = f"{base_url}/v1"
-    return f"{base_url}/chat/completions"
+def _event_field(event: Any, field_name: str) -> Any:
+    if isinstance(event, dict):
+        return event.get(field_name)
+    return getattr(event, field_name, None)
 
 
-def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
-    retry_after = response.headers.get("retry-after")
-    if retry_after:
-        try:
-            return min(float(retry_after), settings.openai_retry_max_delay_seconds)
-        except ValueError:
-            pass
-    base_delay = settings.openai_retry_base_delay_seconds * (2**attempt)
-    if response.status_code == 429:
-        base_delay = max(base_delay, 5.0 * (attempt + 1))
-    return min(base_delay, settings.openai_retry_max_delay_seconds)
-
-
-def _collect_streamed_completion(response: httpx.Response) -> dict[str, Any]:
-    message: dict[str, Any] = {"content": "", "tool_calls": []}
-    finish_reason: str | None = None
-
-    for raw_line in response.iter_lines():
-        if not raw_line:
-            continue
-        line = raw_line if isinstance(raw_line, str) else raw_line.decode("utf-8")
-        if not line.startswith("data: "):
-            continue
-        data = line[6:]
-        if data == "[DONE]":
-            break
-        event = json.loads(data)
-        choice = (event.get("choices") or [{}])[0]
-        finish_reason = choice.get("finish_reason") or finish_reason
-        delta = choice.get("delta") or {}
-        content = delta.get("content")
-        if content:
-            message["content"] += content
-        for tool_call in delta.get("tool_calls") or []:
-            index = int(tool_call.get("index", 0))
-            while len(message["tool_calls"]) <= index:
-                message["tool_calls"].append(
-                    {
-                        "id": "",
-                        "type": "function",
-                        "function": {"name": "", "arguments": ""},
-                    }
-                )
-            current = message["tool_calls"][index]
-            if tool_call.get("id"):
-                current["id"] = tool_call["id"]
-            function = tool_call.get("function") or {}
-            if function.get("name"):
-                current["function"]["name"] += function["name"]
-            if function.get("arguments"):
-                current["function"]["arguments"] += function["arguments"]
-
-    return {
-        "choices": [
-            {
-                "message": message,
-                "finish_reason": finish_reason,
-            }
-        ]
-    }
+def _to_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_none=True)
+    return {}
 
 
 def _parse_final_payload(content: str) -> dict[str, Any]:
@@ -692,6 +752,46 @@ def _parse_json_object(content: str) -> dict[str, Any]:
         raise
 
 
+def _fallback_non_json_response(
+    runtime: ToolRuntime,
+    *,
+    tool_summaries: list[ToolCallSummary],
+    raw_output: str,
+    provider: str,
+) -> ExecuteRunResponse:
+    snippet = _compact_model_output(raw_output)
+    decision_reason = (
+        "Model returned an unstructured final response; execution falls back to skip."
+        if not snippet
+        else f"Model returned an unstructured final response ({snippet}); execution falls back to skip."
+    )
+    reasoning_summary = (
+        "Model returned non-JSON final output after tool execution, so the runtime failed closed to `skip`."
+    )
+    return ExecuteRunResponse(
+        decision=AgentDecision(
+            action="skip",
+            symbol=None,
+            direction=None,
+            size_pct=0.0,
+            reason=decision_reason,
+            state_patch=dict(runtime.pending_state_patch),
+        ),
+        reasoning_summary=reasoning_summary,
+        tool_calls=tool_summaries,
+        provider=provider,
+    )
+
+
+def _compact_model_output(raw_output: str, *, limit: int = 160) -> str:
+    compact = " ".join(str(raw_output or "").split())
+    if not compact:
+        return ""
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."
+
+
 def _sanitize_decision(payload: ExecuteRunRequest, runtime: ToolRuntime, decision_payload: dict[str, Any]) -> AgentDecision:
     merged = dict(runtime.staged_decision)
     merged.update(decision_payload or {})
@@ -703,7 +803,12 @@ def _sanitize_decision(payload: ExecuteRunRequest, runtime: ToolRuntime, decisio
     risk_contract = payload.envelope.get("risk_contract", {}) if isinstance(payload.envelope, dict) else {}
     max_position_pct = float(risk_contract.get("max_position_pct", 0.10) or 0.10)
     size_pct = float(merged.get("size_pct", 0.0) or 0.0)
-    size_pct = max(0.0, min(size_pct, max_position_pct))
+    if action == "open_position":
+        size_pct = max(0.0, min(size_pct, max_position_pct))
+    elif action == "reduce_position":
+        size_pct = max(0.0, min(size_pct, 1.0))
+    else:
+        size_pct = 0.0 if action in {"close_position", "skip", "watch", "hold"} else max(0.0, size_pct)
 
     symbol = merged.get("symbol")
     if isinstance(symbol, str):
@@ -726,11 +831,15 @@ def _sanitize_decision(payload: ExecuteRunRequest, runtime: ToolRuntime, decisio
         take_profit = RiskTarget(type="price_pct", value=DEFAULT_TAKE_PROFIT_PCT)
 
     if action in {"skip", "watch", "hold"}:
-        size_pct = 0.0 if action != "hold" else size_pct
-        if action != "hold":
-            direction = None
-            if action == "skip":
-                symbol = None
+        size_pct = 0.0
+        direction = None
+        if action == "skip":
+            symbol = None
+    elif action == "close_position":
+        size_pct = 0.0
+        direction = None
+    elif action == "reduce_position":
+        direction = None
 
     return AgentDecision(
         action=action,

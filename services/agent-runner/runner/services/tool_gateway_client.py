@@ -8,10 +8,12 @@ import httpx
 
 from runner.config import settings
 from runner.schemas import ExecuteRunRequest
+from runner.services.internal_http import build_internal_http_client
 
 
 READ_ONLY_TOOLS = {
     "scan_market",
+    "get_portfolio_state",
     "get_strategy_state",
     "get_market_metadata",
     "get_candles",
@@ -21,6 +23,7 @@ READ_ONLY_TOOLS = {
 
 TOOL_ENDPOINTS = {
     "scan_market": "/market/scan",
+    "get_portfolio_state": "/portfolio/state",
     "get_market_metadata": "/market/metadata",
     "get_candles": "/market/candles",
     "get_funding_rate": "/market/funding-rate",
@@ -44,9 +47,11 @@ class ToolGatewayClient:
 
         request_payload = {
             "skill_id": self._gateway_context().get("skill_id") or self.payload.skill_id,
+            "scope_kind": self._gateway_context().get("scope_kind"),
+            "scope_id": self._gateway_context().get("scope_id"),
             "mode": self._gateway_context().get("mode") or self.payload.mode,
-            "trigger_time": self._gateway_context().get("trigger_time") or self.payload.trigger_time.isoformat(),
-            "as_of": self._gateway_context().get("as_of") or self.payload.context.get("as_of"),
+            "trigger_time_ms": self._gateway_context().get("trigger_time_ms") or self.payload.trigger_time_ms,
+            "as_of_ms": self._gateway_context().get("as_of_ms") or self.payload.context.get("as_of_ms"),
             "trace_index": self._gateway_context().get("trace_index"),
         }
         request_payload.update(arguments)
@@ -55,13 +60,21 @@ class ToolGatewayClient:
         if shared_secret:
             headers["X-Tool-Gateway-Secret"] = shared_secret
 
-        response = httpx.post(
-            self._endpoint_url(tool_name),
-            json=request_payload,
-            headers=headers,
-            timeout=settings.tool_gateway_timeout_seconds,
-        )
-        response.raise_for_status()
+        try:
+            with build_internal_http_client(timeout=settings.tool_gateway_timeout_seconds) as client:
+                response = client.post(
+                    self._endpoint_url(tool_name),
+                    json=request_payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _extract_error_detail(exc.response)
+            raise RuntimeError(
+                f"Tool Gateway {tool_name} failed with HTTP {exc.response.status_code}: {detail}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Tool Gateway {tool_name} request failed: {exc}") from exc
         result = response.json()
 
         if tool_name in READ_ONLY_TOOLS:
@@ -100,3 +113,31 @@ class ToolGatewayClient:
     def _cache_key(self, tool_name: str, arguments: dict[str, Any]) -> str:
         normalized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
         return f"{tool_name}:{normalized}"
+
+
+def _extract_error_detail(response: httpx.Response) -> str:
+    body = response.text.strip()
+    if not body:
+        return response.reason_phrase or "request failed"
+    try:
+        parsed = response.json()
+    except ValueError:
+        return body
+
+    detail = parsed.get("detail")
+    if isinstance(detail, str) and detail.strip():
+        return detail
+    if isinstance(detail, list):
+        messages: list[str] = []
+        for item in detail:
+            if isinstance(item, dict):
+                location = item.get("loc")
+                loc_text = ".".join(str(part) for part in location) if isinstance(location, list) else None
+                msg = str(item.get("msg") or "").strip()
+                if loc_text and msg:
+                    messages.append(f"{loc_text}: {msg}")
+                elif msg:
+                    messages.append(msg)
+        if messages:
+            return "; ".join(messages)
+    return body

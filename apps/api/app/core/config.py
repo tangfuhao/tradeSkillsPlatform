@@ -20,11 +20,10 @@ class Settings(BaseSettings):
     tool_gateway_base_url: str = "http://localhost:8000"
     tool_gateway_shared_secret: str = ""
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"])
-    preview_window_days: int = 90
     default_benchmark: str = "market_passive_reference"
     scheduler_timezone: str = "UTC"
     scheduler_coalesce: bool = True
-    agent_runner_timeout_seconds: float = 60.0
+    agent_runner_timeout_seconds: float = 180.0
     historical_data_dir: Path = DEFAULT_HISTORICAL_DATA_DIR
     historical_csv_glob: str = "allswap-candlesticks-*.csv"
     historical_base_timeframe: str = "1m"

@@ -5,63 +5,30 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.internal_http import build_internal_http_client
 
 
 def execute_agent_run(payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        response = httpx.post(
-            f"{settings.agent_runner_base_url}/v1/runs/execute",
-            json=payload,
-            timeout=settings.agent_runner_timeout_seconds,
-        )
-        response.raise_for_status()
-        return response.json()
+        with build_internal_http_client(timeout=settings.agent_runner_timeout_seconds) as client:
+            response = client.post(
+                f"{settings.agent_runner_base_url}/v1/runs/execute",
+                json=payload,
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip() or str(exc)
+        raise RuntimeError(f"Agent Runner returned HTTP {exc.response.status_code}: {detail}") from exc
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(
+            "Agent Runner request timed out after "
+            f"{settings.agent_runner_timeout_seconds:.0f}s. "
+            "Increase TRADE_SKILLS_AGENT_RUNNER_TIMEOUT_SECONDS or reduce the model latency budget."
+        ) from exc
     except httpx.HTTPError as exc:
-        return _build_fallback_response(payload, str(exc))
+        raise RuntimeError(f"Agent Runner request failed: {exc}") from exc
 
-
-def _build_fallback_response(payload: dict[str, Any], error_message: str) -> dict[str, Any]:
-    candidates = payload.get("context", {}).get("market_candidates", [])
-    decision = {
-        "action": "skip",
-        "symbol": None,
-        "direction": None,
-        "size_pct": 0.0,
-        "reason": "No market candidate passed the local fallback threshold.",
-        "stop_loss": None,
-        "take_profit": None,
-        "state_patch": {},
-    }
-    if candidates:
-        hottest = max(candidates, key=lambda item: item.get("change_24h_pct", 0.0))
-        if hottest.get("change_24h_pct", 0.0) >= 0.18:
-            decision = {
-                "action": "open_position",
-                "symbol": hottest.get("symbol"),
-                "direction": "sell",
-                "size_pct": 0.10,
-                "reason": "Fallback engine detected an overheated market candidate and opened a demo short.",
-                "stop_loss": {"type": "price_pct", "value": 0.02},
-                "take_profit": {"type": "price_pct", "value": 0.10},
-                "state_patch": {"focus_symbol": hottest.get("symbol"), "last_action": "open_position"},
-            }
-        else:
-            decision = {
-                "action": "watch",
-                "symbol": hottest.get("symbol"),
-                "direction": None,
-                "size_pct": 0.0,
-                "reason": "Fallback engine found a candidate but not enough heat for a demo entry.",
-                "stop_loss": None,
-                "take_profit": None,
-                "state_patch": {"focus_symbol": hottest.get("symbol"), "last_action": "watch"},
-            }
-    return {
-        "decision": decision,
-        "reasoning_summary": f"Agent Runner fallback was used because the HTTP call failed: {error_message}",
-        "tool_calls": [
-            {"tool_name": "scan_market", "arguments": {"mode": payload.get("mode")}, "status": "fallback"},
-            {"tool_name": "get_strategy_state", "arguments": {"skill_id": payload.get("skill_id")}, "status": "fallback"},
-        ],
-        "provider": "local-fallback",
-    }
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("Agent Runner returned a non-JSON response.") from exc
