@@ -8,6 +8,7 @@ from app.schemas import (
     ToolGatewayExecuteResponse,
     ToolGatewayMarketCandlesRequest,
     ToolGatewayMarketScanRequest,
+    ToolGatewayPortfolioStateRequest,
     ToolGatewayMarketSymbolRequest,
     ToolGatewaySignalIntentRequest,
     ToolGatewayStateGetRequest,
@@ -20,6 +21,7 @@ from app.tool_gateway.market_handlers import (
     handle_market_metadata,
     handle_scan_market,
 )
+from app.tool_gateway.portfolio_handlers import handle_get_portfolio_state
 from app.tool_gateway.signal_handlers import handle_signal_intent
 from app.tool_gateway.state_handlers import handle_get_strategy_state, handle_save_strategy_state
 from app.tool_gateway.demo_gateway import execute_tool_gateway_request
@@ -124,7 +126,14 @@ def state_get(
     db: Session = Depends(get_db),
     _: None = Depends(_require_tool_gateway_secret),
 ) -> ToolGatewayExecuteResponse:
-    return ToolGatewayExecuteResponse.model_validate(handle_get_strategy_state(db, skill_id=payload.skill_id))
+    return ToolGatewayExecuteResponse.model_validate(
+        handle_get_strategy_state(
+            db,
+            skill_id=payload.skill_id,
+            scope_kind=payload.scope_kind,
+            scope_id=payload.scope_id,
+        )
+    )
 
 
 @router.post("/state/save", response_model=ToolGatewayExecuteResponse, include_in_schema=False)
@@ -134,7 +143,30 @@ def state_save(
     _: None = Depends(_require_tool_gateway_secret),
 ) -> ToolGatewayExecuteResponse:
     return ToolGatewayExecuteResponse.model_validate(
-        handle_save_strategy_state(db, skill_id=payload.skill_id, patch=payload.patch)
+        handle_save_strategy_state(
+            db,
+            skill_id=payload.skill_id,
+            scope_kind=payload.scope_kind,
+            scope_id=payload.scope_id,
+            patch=payload.patch,
+        )
+    )
+
+
+@router.post("/portfolio/state", response_model=ToolGatewayExecuteResponse, include_in_schema=False)
+def portfolio_state(
+    payload: ToolGatewayPortfolioStateRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(_require_tool_gateway_secret),
+) -> ToolGatewayExecuteResponse:
+    return ToolGatewayExecuteResponse.model_validate(
+        handle_get_portfolio_state(
+            db,
+            skill_id=payload.skill_id,
+            scope_kind=payload.scope_kind,
+            scope_id=payload.scope_id,
+            as_of=payload.as_of or payload.trigger_time,
+        )
     )
 
 
@@ -186,6 +218,8 @@ def execute_tool_gateway(
         db=db,
         tool_name=payload.tool_name,
         skill_id=payload.skill_id,
+        scope_kind=payload.scope_kind,
+        scope_id=payload.scope_id,
         mode=payload.mode,
         trigger_time=payload.trigger_time,
         arguments=payload.arguments,

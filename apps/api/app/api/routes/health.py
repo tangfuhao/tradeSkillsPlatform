@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.core.config import settings
 from app.runtime.scheduler import scheduler_manager
 from app.schemas import HealthResponse
-from app.services.utils import utc_now
+from app.services.utils import datetime_to_ms, utc_now
 
 
 router = APIRouter(tags=["health"])
@@ -18,5 +18,5 @@ def health() -> HealthResponse:
         agent_runner_base_url=settings.agent_runner_base_url,
         scheduler_running=scheduler_manager.is_running(),
         active_scheduler_jobs=scheduler_manager.job_count(),
-        server_time=utc_now(),
+        server_time_ms=datetime_to_ms(utc_now()),
     )

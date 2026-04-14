@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.services.utils import ms_to_datetime
 
 
 class SkillCreateRequest(BaseModel):
@@ -11,38 +12,43 @@ class SkillCreateRequest(BaseModel):
     skill_text: str = Field(min_length=20)
 
 
-class SkillReviewUpdateRequest(BaseModel):
-    review_status: Literal["preview_ready", "review_pending", "approved_full_window", "review_rejected"]
-
-
 class SkillResponse(BaseModel):
     id: str
     title: str
     validation_status: str
-    review_status: str
     source_hash: str
     envelope: dict[str, Any]
     validation_errors: list[str]
     validation_warnings: list[str]
-    preview_window: dict[str, datetime]
-    created_at: datetime
-    updated_at: datetime
+    created_at_ms: int
+    updated_at_ms: int
 
 
 class BacktestCreateRequest(BaseModel):
     skill_id: str
-    start_time: datetime
-    end_time: datetime
+    start_time_ms: int
+    end_time_ms: int
     initial_capital: float = Field(default=10000.0, gt=0)
+
+    @property
+    def start_time(self):
+        return ms_to_datetime(self.start_time_ms)
+
+    @property
+    def end_time(self):
+        return ms_to_datetime(self.end_time_ms)
 
 
 class TraceResponse(BaseModel):
     id: str
     trace_index: int
-    trigger_time: datetime
+    trigger_time_ms: int
     reasoning_summary: str
     decision: dict[str, Any]
     tool_calls: list[dict[str, Any]]
+    portfolio_before: dict[str, Any] | None = None
+    portfolio_after: dict[str, Any] | None = None
+    fills: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BacktestResponse(BaseModel):
@@ -51,13 +57,13 @@ class BacktestResponse(BaseModel):
     status: str
     scope: str
     benchmark_name: str
-    start_time: datetime
-    end_time: datetime
+    start_time_ms: int
+    end_time_ms: int
     initial_capital: float
     summary: dict[str, Any] | None
     error_message: str | None
-    created_at: datetime
-    updated_at: datetime
+    created_at_ms: int
+    updated_at_ms: int
 
 
 class LiveTaskCreateRequest(BaseModel):
@@ -70,18 +76,18 @@ class LiveTaskResponse(BaseModel):
     status: str
     cadence: str
     cadence_seconds: int
-    last_triggered_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+    last_triggered_at_ms: int | None
+    created_at_ms: int
+    updated_at_ms: int
 
 
 class LiveSignalResponse(BaseModel):
     id: str
     live_task_id: str
-    trigger_time: datetime
+    trigger_time_ms: int
     delivery_status: str
     signal: dict[str, Any]
-    created_at: datetime
+    created_at_ms: int
 
 
 class HealthResponse(BaseModel):
@@ -91,7 +97,7 @@ class HealthResponse(BaseModel):
     agent_runner_base_url: str
     scheduler_running: bool
     active_scheduler_jobs: int
-    server_time: datetime
+    server_time_ms: int
 
 
 class MarketCandleResponse(BaseModel):
@@ -99,7 +105,6 @@ class MarketCandleResponse(BaseModel):
     base_symbol: str
     timeframe: str
     open_time_ms: int
-    open_time: datetime
     open: float
     high: float
     low: float
@@ -116,8 +121,8 @@ class MarketOverviewResponse(BaseModel):
     base_timeframe: str
     total_candles: int
     total_symbols: int
-    coverage_start: str | None
-    coverage_end: str | None
+    coverage_start_ms: int | None
+    coverage_end_ms: int | None
     recent_csv_jobs: list[dict[str, Any]]
     sync_cursors: list[dict[str, Any]]
 
@@ -125,11 +130,21 @@ class MarketOverviewResponse(BaseModel):
 class ToolGatewayExecuteRequest(BaseModel):
     tool_name: str
     skill_id: str
+    scope_kind: str
+    scope_id: str
     mode: Literal["backtest", "live_signal"]
-    trigger_time: datetime
-    as_of: datetime | None = None
+    trigger_time_ms: int
+    as_of_ms: int | None = None
     trace_index: int | None = None
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def trigger_time(self):
+        return ms_to_datetime(self.trigger_time_ms)
+
+    @property
+    def as_of(self):
+        return ms_to_datetime(self.as_of_ms) if self.as_of_ms is not None else None
 
 
 class ToolGatewayExecuteResponse(BaseModel):
@@ -139,10 +154,20 @@ class ToolGatewayExecuteResponse(BaseModel):
 
 class ToolGatewayBaseRequest(BaseModel):
     skill_id: str
+    scope_kind: str
+    scope_id: str
     mode: Literal["backtest", "live_signal"]
-    trigger_time: datetime
-    as_of: datetime | None = None
+    trigger_time_ms: int
+    as_of_ms: int | None = None
     trace_index: int | None = None
+
+    @property
+    def trigger_time(self):
+        return ms_to_datetime(self.trigger_time_ms)
+
+    @property
+    def as_of(self):
+        return ms_to_datetime(self.as_of_ms) if self.as_of_ms is not None else None
 
 
 class ToolGatewayMarketScanRequest(ToolGatewayBaseRequest):
@@ -156,7 +181,7 @@ class ToolGatewayMarketSymbolRequest(ToolGatewayBaseRequest):
 
 class ToolGatewayMarketCandlesRequest(ToolGatewayMarketSymbolRequest):
     timeframe: str = Field(min_length=1)
-    limit: int = Field(default=80, ge=1, le=200)
+    limit: int = Field(default=80, ge=1, le=240)
 
 
 class ToolGatewayStateGetRequest(ToolGatewayBaseRequest):
@@ -167,6 +192,10 @@ class ToolGatewayStateSaveRequest(ToolGatewayBaseRequest):
     patch: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolGatewayPortfolioStateRequest(ToolGatewayBaseRequest):
+    pass
+
+
 class ToolGatewaySignalIntentRequest(ToolGatewayBaseRequest):
     action: str | None = None
     symbol: str | None = None
@@ -175,3 +204,12 @@ class ToolGatewaySignalIntentRequest(ToolGatewayBaseRequest):
     reason: str | None = None
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
+
+
+class PortfolioStateResponse(BaseModel):
+    scope_kind: str
+    scope_id: str
+    skill_id: str
+    account: dict[str, Any]
+    positions: list[dict[str, Any]] = Field(default_factory=list)
+    recent_fills: list[dict[str, Any]] = Field(default_factory=list)

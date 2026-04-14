@@ -1,6 +1,26 @@
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const agentRunnerBaseUrl = import.meta.env.VITE_AGENT_RUNNER_BASE_URL ?? 'http://localhost:8100';
 
+function extractErrorMessage(body: string, status: number): string {
+  if (!body) {
+    return `Request failed with ${status}`;
+  }
+
+  try {
+    const parsed = JSON.parse(body) as { detail?: string | Array<{ msg?: string }> };
+    if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+    if (Array.isArray(parsed.detail) && parsed.detail.length) {
+      return parsed.detail.map((item) => item.msg).filter(Boolean).join('; ');
+    }
+  } catch {
+    // Fall back to the raw response body when the server did not return JSON.
+  }
+
+  return body;
+}
+
 async function readJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
     headers: {
@@ -10,7 +30,7 @@ async function readJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed with ${response.status}`);
+    throw new Error(extractErrorMessage(body, response.status));
   }
   return response.json() as Promise<T>;
 }
@@ -42,13 +62,6 @@ export async function createSkill(payload: { title?: string; skill_text: string 
   });
 }
 
-export async function updateSkillReviewState(skillId: string, reviewStatus: string): Promise<any> {
-  return readJson(`${apiBaseUrl}/api/v1/skills/${skillId}/review-state`, {
-    method: 'POST',
-    body: JSON.stringify({ review_status: reviewStatus }),
-  });
-}
-
 export async function listBacktests(): Promise<any[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`);
 }
@@ -57,7 +70,7 @@ export async function listBacktestTraces(runId: string): Promise<any[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/traces`);
 }
 
-export async function createBacktest(payload: { skill_id: string; start_time: string; end_time: string; initial_capital: number }): Promise<any> {
+export async function createBacktest(payload: { skill_id: string; start_time_ms: number; end_time_ms: number; initial_capital: number }): Promise<any> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`, {
     method: 'POST',
     body: JSON.stringify(payload),

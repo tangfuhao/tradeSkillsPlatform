@@ -6,7 +6,8 @@ from typing import Iterable
 from app.services.utils import ensure_utc
 
 
-MAX_REPLAY_STEPS = 48
+# Keep replay bounds high enough to cover a full day of 15m bars in local dev.
+MAX_REPLAY_STEPS = 512
 
 
 def cadence_to_seconds(cadence: str) -> int:
@@ -33,16 +34,6 @@ def build_trigger_times(start_time: datetime, end_time: datetime, cadence: str) 
         if len(points) >= MAX_REPLAY_STEPS:
             return points, True
     return points, False
-
-
-def compute_demo_trade_return(step_index: int, direction: str | None) -> float:
-    cycle = [0.014, -0.009, 0.018, 0.011, -0.006, 0.016]
-    base = cycle[step_index % len(cycle)]
-    if direction == "buy":
-        return round(base * 0.8, 4)
-    return round(base, 4)
-
-
 def compute_max_drawdown(equity_curve: Iterable[float]) -> float:
     peak = 0.0
     max_drawdown = 0.0

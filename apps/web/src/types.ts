@@ -4,12 +4,6 @@ export type ServicePulse = {
   details?: string;
 };
 
-export type ReviewStatus =
-  | 'preview_ready'
-  | 'review_pending'
-  | 'approved_full_window'
-  | 'review_rejected';
-
 export type SkillEnvelope = {
   trigger?: {
     value?: string;
@@ -26,15 +20,10 @@ export type Skill = {
   id: string;
   title: string;
   validation_status: string;
-  review_status: ReviewStatus;
   source_hash: string;
   envelope: SkillEnvelope;
-  preview_window: {
-    start: string;
-    end: string;
-  };
-  created_at: string;
-  updated_at: string;
+  created_at_ms: number;
+  updated_at_ms: number;
 };
 
 export type BacktestRun = {
@@ -43,13 +32,13 @@ export type BacktestRun = {
   status: string;
   scope: string;
   benchmark_name: string;
-  start_time: string;
-  end_time: string;
+  start_time_ms: number;
+  end_time_ms: number;
   initial_capital: number;
   summary: Record<string, unknown> | null;
   error_message: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at_ms: number;
+  updated_at_ms: number;
 };
 
 export type ToolCall = {
@@ -61,7 +50,7 @@ export type ToolCall = {
 export type BacktestTrace = {
   id: string;
   trace_index: number;
-  trigger_time: string;
+  trigger_time_ms: number;
   reasoning_summary: string;
   decision: Record<string, unknown>;
   tool_calls: ToolCall[];
@@ -73,17 +62,17 @@ export type LiveTask = {
   status: string;
   cadence: string;
   cadence_seconds: number;
-  last_triggered_at: string | null;
-  created_at: string;
-  updated_at: string;
+  last_triggered_at_ms: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
 };
 
 export type LiveSignal = {
   id: string;
   live_task_id: string;
-  trigger_time: string;
+  trigger_time_ms: number;
   delivery_status: string;
-  created_at: string;
+  created_at_ms: number;
   signal: {
     action?: string;
     symbol?: string | null;
@@ -92,6 +81,7 @@ export type LiveSignal = {
     reason?: string;
     reasoning_summary?: string;
     provider?: string;
+    error_message?: string;
   };
 };
 
@@ -102,9 +92,9 @@ export type CsvIngestionJob = {
   rows_seen: number;
   rows_inserted: number;
   rows_filtered: number;
-  coverage_start: string | null;
-  coverage_end: string | null;
-  completed_at: string | null;
+  coverage_start_ms: number | null;
+  coverage_end_ms: number | null;
+  completed_at_ms: number | null;
   error_message: string | null;
 };
 
@@ -113,8 +103,7 @@ export type MarketSyncCursor = {
   timeframe: string;
   status: string;
   last_synced_open_time_ms: number | null;
-  last_synced_open_time: string | null;
-  last_sync_completed_at: string | null;
+  last_sync_completed_at_ms: number | null;
   notes: Record<string, unknown>;
 };
 
@@ -123,8 +112,8 @@ export type MarketOverview = {
   base_timeframe: string;
   total_candles: number;
   total_symbols: number;
-  coverage_start: string | null;
-  coverage_end: string | null;
+  coverage_start_ms: number | null;
+  coverage_end_ms: number | null;
   recent_csv_jobs: CsvIngestionJob[];
   sync_cursors: MarketSyncCursor[];
 };

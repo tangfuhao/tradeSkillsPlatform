@@ -15,7 +15,6 @@ import {
   listSignals,
   listSkills,
   triggerLiveTask,
-  updateSkillReviewState,
 } from './api';
 import type {
   BacktestRun,
@@ -23,7 +22,6 @@ import type {
   LiveSignal,
   LiveTask,
   MarketOverview,
-  ReviewStatus,
   ServicePulse,
   Skill,
   ToolCall,
@@ -57,13 +55,6 @@ const defaultSkill = `# 短线过热做空策略
 - 同时持仓不超过 2 个。
 - 不允许对冲。`;
 
-const reviewStatusLabels: Record<string, string> = {
-  preview_ready: '预览窗口可用',
-  review_pending: '等待人工审核',
-  approved_full_window: '已批准全量历史',
-  review_rejected: '已拒绝扩展历史',
-};
-
 const generalStatusLabels: Record<string, string> = {
   ok: '正常',
   healthy: '正常',
@@ -96,8 +87,7 @@ const directionLabels: Record<string, string> = {
 };
 
 const scopeLabels: Record<string, string> = {
-  preview: '预览窗口',
-  approved: '全量历史',
+  historical: '历史回放',
 };
 
 function toDateTimeLocal(value: Date): string {
@@ -111,8 +101,8 @@ function translateToken(value?: string | null, dictionary: Record<string, string
   return dictionary[value] ?? value.replace(/_/g, ' ');
 }
 
-function formatTime(value?: string | null): string {
-  if (!value) return '--';
+function formatTime(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '--';
   return new Intl.DateTimeFormat(LOCALE, {
@@ -130,10 +120,6 @@ function formatCount(value?: number | null): string {
 function formatPercent(value?: number | null): string {
   if (typeof value !== 'number' || Number.isNaN(value)) return '--';
   return `${(value * 100).toFixed(2)}%`;
-}
-
-function describeReviewStatus(status?: ReviewStatus): string {
-  return translateToken(status, reviewStatusLabels);
 }
 
 function describeStatus(status?: string | null): string {
@@ -176,10 +162,30 @@ function isBacktestActive(status?: string): boolean {
 function countSignalsToday(signals: LiveSignal[]): number {
   const today = new Intl.DateTimeFormat(LOCALE, { dateStyle: 'short' }).format(new Date());
   return signals.filter((signal) => {
-    const signalDate = new Date(signal.trigger_time);
+    const signalDate = new Date(signal.trigger_time_ms);
     if (Number.isNaN(signalDate.getTime())) return false;
     return new Intl.DateTimeFormat(LOCALE, { dateStyle: 'short' }).format(signalDate) === today;
   }).length;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function getDefaultBacktestWindow(overview: MarketOverview | null): { start: string; end: string } | null {
+  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
+  const coverageStart = new Date(overview.coverage_start_ms);
+  const coverageEnd = new Date(overview.coverage_end_ms);
+  if (Number.isNaN(coverageStart.getTime()) || Number.isNaN(coverageEnd.getTime()) || coverageEnd <= coverageStart) {
+    return null;
+  }
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startMs = Math.max(coverageStart.getTime(), coverageEnd.getTime() - dayMs);
+  return {
+    start: toDateTimeLocal(new Date(startMs)),
+    end: toDateTimeLocal(coverageEnd),
+  };
 }
 
 function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutral' {
@@ -187,10 +193,10 @@ function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutr
   if (['ok', 'healthy', 'completed', 'active', 'stored', 'passed'].includes(status)) {
     return 'ok';
   }
-  if (['queued', 'running', 'pending', 'preview_ready', 'review_pending', 'skipped'].includes(status)) {
+  if (['queued', 'running', 'pending', 'skipped'].includes(status)) {
     return 'warn';
   }
-  if (['failed', 'review_rejected', 'validation_failed', 'degraded'].includes(status)) {
+  if (['failed', 'validation_failed', 'degraded'].includes(status)) {
     return 'error';
   }
   return 'neutral';
@@ -281,8 +287,9 @@ export default function App() {
   const [traceError, setTraceError] = useState<string | null>(null);
   const [message, setMessage] = useState('准备就绪，可以开始编排新的策略。');
   const [loading, setLoading] = useState(false);
-  const [backtestStart, setBacktestStart] = useState(toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
-  const [backtestEnd, setBacktestEnd] = useState(toDateTimeLocal(new Date()));
+  const [backtestStart, setBacktestStart] = useState('');
+  const [backtestEnd, setBacktestEnd] = useState('');
+  const [backtestWindowInitialized, setBacktestWindowInitialized] = useState(false);
   const [initialCapital, setInitialCapital] = useState(10000);
 
   const selectedSkill = useMemo(
@@ -301,9 +308,10 @@ export default function App() {
   const latestCsvJob = marketOverview?.recent_csv_jobs?.[0] ?? null;
   const skippedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'skipped').length ?? 0;
   const traceAutoRefresh = isBacktestActive(selectedBacktest?.status);
+  const hasHistoricalCoverage = marketOverview?.coverage_start_ms != null && marketOverview?.coverage_end_ms != null;
 
   const heroMetrics = useMemo(() => {
-    const approvedCount = skills.filter((skill) => skill.review_status === 'approved_full_window').length;
+    const passedCount = skills.filter((skill) => skill.validation_status === 'passed').length;
     const activeBacktests = backtests.filter((run) => isBacktestActive(run.status)).length;
     const activeLiveTasks = liveTasks.filter((task) => task.status === 'active').length;
     const todaySignals = countSignalsToday(signals);
@@ -312,7 +320,7 @@ export default function App() {
       {
         label: '策略版本',
         value: formatCount(skills.length),
-        detail: `${formatCount(approvedCount)} 个已批准全量历史`,
+        detail: `${formatCount(passedCount)} 个验证通过`,
         tone: 'accent' as const,
       },
       {
@@ -381,7 +389,7 @@ export default function App() {
       setBacktestTraces(traces);
       setTraceError(null);
     } catch (error) {
-      setTraceError(`读取轨迹失败：${String(error)}`);
+      setTraceError(`读取轨迹失败：${getErrorMessage(error)}`);
     } finally {
       if (!silent) {
         setTraceLoading(false);
@@ -391,9 +399,22 @@ export default function App() {
 
   useEffect(() => {
     refreshDashboard().catch((error) => {
-      setMessage(`初始化检查失败：${String(error)}`);
+      setMessage(`初始化检查失败：${getErrorMessage(error)}`);
     });
   }, []);
+
+  useEffect(() => {
+    if (backtestWindowInitialized) {
+      return;
+    }
+    const nextWindow = getDefaultBacktestWindow(marketOverview);
+    if (!nextWindow) {
+      return;
+    }
+    setBacktestStart(nextWindow.start);
+    setBacktestEnd(nextWindow.end);
+    setBacktestWindowInitialized(true);
+  }, [marketOverview, backtestWindowInitialized]);
 
   useEffect(() => {
     if (!selectedBacktest?.id) {
@@ -403,7 +424,7 @@ export default function App() {
     }
 
     refreshTraceViewer(selectedBacktest.id).catch((error) => {
-      setTraceError(`读取轨迹失败：${String(error)}`);
+      setTraceError(`读取轨迹失败：${getErrorMessage(error)}`);
     });
   }, [selectedBacktest?.id]);
 
@@ -414,7 +435,7 @@ export default function App() {
 
     const timer = window.setInterval(() => {
       Promise.all([refreshDashboard(), refreshTraceViewer(selectedBacktest.id, true)]).catch((error) => {
-        setTraceError(`刷新轨迹失败：${String(error)}`);
+        setTraceError(`刷新轨迹失败：${getErrorMessage(error)}`);
       });
     }, 2500);
 
@@ -434,10 +455,10 @@ export default function App() {
     try {
       const created = await createSkill({ skill_text: nextSkillText });
       setSelectedSkillId(created.id);
-      setMessage(`策略《${created.title}》已生成，可在预览窗口中使用。`);
+      setMessage(`策略《${created.title}》已生成，可以直接用于历史回放和实时信号。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`策略上传失败：${String(error)}`);
+      setMessage(`策略上传失败：${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -447,6 +468,10 @@ export default function App() {
     event.preventDefault();
     if (!selectedSkill) {
       setMessage('请先创建或选择一个策略，再发起回放。');
+      return;
+    }
+    if (!hasHistoricalCoverage) {
+      setMessage('当前没有可用的本地历史数据，请先导入 CSV 后再发起回放。');
       return;
     }
 
@@ -470,8 +495,8 @@ export default function App() {
     try {
       const created = await createBacktest({
         skill_id: selectedSkill.id,
-        start_time: startDate.toISOString(),
-        end_time: endDate.toISOString(),
+        start_time_ms: startDate.getTime(),
+        end_time_ms: endDate.getTime(),
         initial_capital: initialCapital,
       });
       setSelectedBacktestId(created.id);
@@ -480,27 +505,7 @@ export default function App() {
       setMessage(`回放任务 ${created.id} 已进入队列，执行轨迹会自动刷新。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`创建回放失败：${String(error)}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleReviewUpdate(reviewStatus: ReviewStatus) {
-    if (!selectedSkill) {
-      setMessage('请先选择一个策略，再更新审核状态。');
-      return;
-    }
-
-    setLoading(true);
-    setMessage(`正在更新《${selectedSkill.title}》的审核状态...`);
-    try {
-      const updated = await updateSkillReviewState(selectedSkill.id, reviewStatus);
-      setSelectedSkillId(updated.id);
-      setMessage(`策略《${updated.title}》状态已更新为：${describeReviewStatus(updated.review_status)}。`);
-      await refreshDashboard();
-    } catch (error) {
-      setMessage(`更新审核状态失败：${String(error)}`);
+      setMessage(`创建回放失败：${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -520,7 +525,7 @@ export default function App() {
       setMessage(`实时任务 ${created.id} 已激活，执行节奏为 ${created.cadence}。`);
       await refreshDashboard();
     } catch (error) {
-      setMessage(`激活实时任务失败：${String(error)}`);
+      setMessage(`激活实时任务失败：${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -535,11 +540,15 @@ export default function App() {
     setLoading(true);
     setMessage('正在立刻执行一次实时信号任务...');
     try {
-      await triggerLiveTask(selectedTask.id);
-      setMessage(`实时任务 ${selectedTask.id} 已产出新的信号记录。`);
+      const signal = await triggerLiveTask(selectedTask.id);
+      if (signal.delivery_status === 'failed') {
+        setMessage(`实时任务 ${selectedTask.id} 执行失败：${signal.signal?.error_message ?? '请查看最近信号列表。'}`);
+      } else {
+        setMessage(`实时任务 ${selectedTask.id} 已产出新的信号记录。`);
+      }
       await refreshDashboard();
     } catch (error) {
-      setMessage(`手动触发失败：${String(error)}`);
+      setMessage(`手动触发失败：${getErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
@@ -586,7 +595,7 @@ export default function App() {
             title="运行脉冲"
             subtitle="检查核心服务是否在线，以及当前连接的地址。"
             action={
-              <button type="button" onClick={() => refreshDashboard().catch((error) => setMessage(`刷新失败：${String(error)}`))}>
+              <button type="button" onClick={() => refreshDashboard().catch((error) => setMessage(`刷新失败：${getErrorMessage(error)}`))}>
                 刷新数据
               </button>
             }
@@ -616,8 +625,8 @@ export default function App() {
           <div className="insight-grid">
             <MetricCard label="覆盖币种" value={formatCount(marketOverview?.total_symbols)} detail="已纳入本地历史仓库的交易标的数量" tone="accent" />
             <MetricCard label="1 分钟 K 线" value={formatCount(marketOverview?.total_candles)} detail="供回放与聚合计算使用的基础数据量" />
-            <MetricCard label="覆盖开始" value={formatTime(marketOverview?.coverage_start)} detail="最早可用于回放的数据时间点" />
-            <MetricCard label="覆盖结束" value={formatTime(marketOverview?.coverage_end)} detail="最近一次落盘后的时间边界" tone="warm" />
+            <MetricCard label="覆盖开始" value={formatTime(marketOverview?.coverage_start_ms)} detail="最早可用于回放的数据时间点" />
+            <MetricCard label="覆盖结束" value={formatTime(marketOverview?.coverage_end_ms)} detail="最近一次落盘后的时间边界" tone="warm" />
           </div>
           <div className="meta-strip">
             <div className="info-box compact-box">
@@ -650,7 +659,7 @@ export default function App() {
               placeholder="在这里粘贴或撰写你的交易 Skill..."
             />
             <div className="form-footer">
-              <p>上传后会生成可回放、可审核、可激活实时任务的统一策略版本。</p>
+              <p>上传后会生成可回放、可激活实时任务的统一策略版本。</p>
               <button className="primary-button" type="submit" disabled={loading}>
                 上传策略
               </button>
@@ -659,7 +668,7 @@ export default function App() {
         </article>
 
         <article className="panel tall-panel">
-          <PanelHeader title="执行实验室" subtitle="先审核策略，再发起回放，最后进入实时信号阶段。" />
+          <PanelHeader title="执行实验室" subtitle="选择策略、对齐历史覆盖窗口，然后发起回放或进入实时信号阶段。" />
           <div className="stack compact">
             <label>
               <span>当前策略</span>
@@ -679,58 +688,45 @@ export default function App() {
             <div className="info-box skill-status-box">
               <div className="info-head">
                 <strong>{selectedSkill?.title ?? '还没有策略版本'}</strong>
-                <span className={`status-chip chip-${toneForStatus(selectedSkill?.review_status)}`}>
-                  {selectedSkill ? describeReviewStatus(selectedSkill.review_status) : '等待创建'}
+                <span className={`status-chip chip-${toneForStatus(selectedSkill?.validation_status)}`}>
+                  {selectedSkill ? describeStatus(selectedSkill.validation_status) : '等待创建'}
                 </span>
               </div>
               <p>验证状态：{selectedSkill ? describeStatus(selectedSkill.validation_status) : '--'}</p>
               <p>执行节奏：{selectedSkill?.envelope?.trigger?.value ?? '--'}</p>
               <p>
-                预览窗口：{formatTime(selectedSkill?.preview_window?.start)} - {formatTime(selectedSkill?.preview_window?.end)}
+                历史覆盖：{formatTime(marketOverview?.coverage_start_ms)} - {formatTime(marketOverview?.coverage_end_ms)}
               </p>
               <p>工具约束：{(selectedSkill?.envelope?.tool_contract?.required_tools ?? []).join('、') || '系统暂未抽取工具限制'}</p>
             </div>
 
-            <div className="review-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => handleReviewUpdate('preview_ready')}
-                disabled={loading || !selectedSkill}
-              >
-                设为预览
-              </button>
-              <button
-                className="ghost-button"
-                type="button"
-                onClick={() => handleReviewUpdate('review_pending')}
-                disabled={loading || !selectedSkill}
-              >
-                提交审核
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => handleReviewUpdate('approved_full_window')}
-                disabled={loading || !selectedSkill}
-              >
-                批准全量历史
-              </button>
-            </div>
-
             <div className="info-box hint-box">
-              <p>预览策略默认只允许在最近窗口中回放。若你要重放更早的 CSV 历史数据，请先完成全量历史批准。</p>
+              <p>
+                {hasHistoricalCoverage
+                  ? '回放时间默认对齐到本地历史覆盖结束点；超出覆盖范围的请求会在创建时直接被拒绝。'
+                  : '当前还没有可用的本地历史覆盖，导入 CSV 后才可以发起回放。'}
+              </p>
             </div>
 
             <form className="stack compact" onSubmit={handleBacktest}>
               <div className="field-row">
                 <label>
                   <span>回放开始时间</span>
-                  <input type="datetime-local" value={backtestStart} onChange={(event) => setBacktestStart(event.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={backtestStart}
+                    onChange={(event) => setBacktestStart(event.target.value)}
+                    disabled={!hasHistoricalCoverage}
+                  />
                 </label>
                 <label>
                   <span>回放结束时间</span>
-                  <input type="datetime-local" value={backtestEnd} onChange={(event) => setBacktestEnd(event.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={backtestEnd}
+                    onChange={(event) => setBacktestEnd(event.target.value)}
+                    disabled={!hasHistoricalCoverage}
+                  />
                 </label>
               </div>
               <label>
@@ -741,9 +737,10 @@ export default function App() {
                   step={500}
                   value={initialCapital}
                   onChange={(event) => setInitialCapital(Number(event.target.value))}
+                  disabled={!hasHistoricalCoverage}
                 />
               </label>
-              <button className="primary-button" type="submit" disabled={loading || !selectedSkill}>
+              <button className="primary-button" type="submit" disabled={loading || !selectedSkill || !hasHistoricalCoverage}>
                 发起回放
               </button>
             </form>
@@ -756,7 +753,7 @@ export default function App() {
               <span>
                 状态：{selectedTask ? describeStatus(selectedTask.status) : '--'} / 节奏：{selectedTask?.cadence ?? '--'}
               </span>
-              <small>上次触发：{formatTime(selectedTask?.last_triggered_at)}</small>
+              <small>上次触发：{formatTime(selectedTask?.last_triggered_at_ms)}</small>
             </div>
 
             <div className="field-row action-row">
@@ -781,9 +778,9 @@ export default function App() {
                   key={skill.id}
                   active={selectedSkill?.id === skill.id}
                   title={skill.title}
-                  subtitle={`${describeReviewStatus(skill.review_status)} / ${describeStatus(skill.validation_status)}`}
+                  subtitle={describeStatus(skill.validation_status)}
                   meta={`${skill.envelope?.trigger?.value ?? '--'} 节奏`}
-                  badge={skill.review_status === 'approved_full_window' ? '全量' : '预览'}
+                  badge={skill.envelope?.trigger?.value ?? '--'}
                   onClick={() => setSelectedSkillId(skill.id)}
                 />
               ))
@@ -809,7 +806,7 @@ export default function App() {
                     active={selectedBacktest?.id === run.id}
                     title={run.id}
                     subtitle={`${describeStatus(run.status)} / ${describeScope(run.scope)}`}
-                    meta={`${totalReturnPct} / ${formatTime(run.created_at)}`}
+                    meta={`${totalReturnPct} / ${formatTime(run.created_at_ms)}`}
                     badge={describeStatus(run.status)}
                     onClick={() => setSelectedBacktestId(run.id)}
                   />
@@ -827,16 +824,21 @@ export default function App() {
           <PanelHeader title="最近信号" subtitle="查看最近一次实时任务输出的交易动作与方向。" />
           <div className="list-shell">
             {signals.length ? (
-              signals.map((signal) => (
-                <ListCard
-                  key={signal.id}
-                  interactive={false}
-                  title={signal.signal.symbol ?? describeAction(signal.signal.action) ?? signal.id}
-                  subtitle={`${describeAction(signal.signal.action)} / ${describeDirection(signal.signal.direction)}`}
-                  meta={`${describeStatus(signal.delivery_status)} / ${formatTime(signal.trigger_time)}`}
-                  badge={describeStatus(signal.delivery_status)}
-                />
-              ))
+              signals.map((signal) => {
+                const failed = signal.delivery_status === 'failed';
+                return (
+                  <ListCard
+                    key={signal.id}
+                    interactive={false}
+                    title={signal.signal.symbol ?? (failed ? '执行失败' : describeAction(signal.signal.action) || signal.id)}
+                    subtitle={failed
+                      ? signal.signal.error_message ?? '请检查 Runner、工具网关或历史数据覆盖。'
+                      : `${describeAction(signal.signal.action)} / ${describeDirection(signal.signal.direction)}`}
+                    meta={`${describeStatus(signal.delivery_status)} / ${formatTime(signal.trigger_time_ms)}`}
+                    badge={describeStatus(signal.delivery_status)}
+                  />
+                );
+              })
             ) : (
               <div className="empty-state">
                 <p>暂无实时信号输出，激活任务后这里会持续刷新。</p>
@@ -919,7 +921,7 @@ export default function App() {
                         <div className="trace-head">
                           <div>
                             <p className="trace-step-label">第 {trace.trace_index + 1} 步</p>
-                            <strong>{formatTime(trace.trigger_time)}</strong>
+                            <strong>{formatTime(trace.trigger_time_ms)}</strong>
                           </div>
                           <div className="trace-pill-row">
                             <span className={`status-chip action-chip action-${rawAction}`}>{describeAction(rawAction)}</span>

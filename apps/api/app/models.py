@@ -31,6 +31,8 @@ class Skill(Base):
     backtests: Mapped[list[BacktestRun]] = relationship(back_populates="skill")
     live_tasks: Mapped[list[LiveTask]] = relationship(back_populates="skill")
     strategy_state: Mapped[StrategyState | None] = relationship(back_populates="skill", uselist=False)
+    execution_strategy_states: Mapped[list[ExecutionStrategyState]] = relationship(back_populates="skill")
+    portfolio_books: Mapped[list[PortfolioBook]] = relationship(back_populates="skill")
 
 
 class BacktestRun(Base):
@@ -39,7 +41,7 @@ class BacktestRun(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
-    scope: Mapped[str] = mapped_column(String(32), default="preview")
+    scope: Mapped[str] = mapped_column(String(32), default="historical")
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     initial_capital: Mapped[float] = mapped_column(Float)
@@ -67,6 +69,7 @@ class RunTrace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     run: Mapped[BacktestRun] = relationship(back_populates="traces")
+    execution_detail: Mapped[TraceExecutionDetail | None] = relationship(back_populates="trace", uselist=False)
 
 
 class LiveTask(Base):
@@ -108,6 +111,117 @@ class StrategyState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     skill: Mapped[Skill] = relationship(back_populates="strategy_state")
+
+
+class ExecutionStrategyState(Base):
+    __tablename__ = "execution_strategy_states"
+    __table_args__ = (
+        UniqueConstraint("scope_kind", "scope_id", name="uq_execution_strategy_state_scope"),
+        Index("ix_execution_strategy_state_skill_scope", "skill_id", "scope_kind", "scope_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_id: Mapped[str] = mapped_column(String(32), index=True)
+    state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    skill: Mapped[Skill] = relationship(back_populates="execution_strategy_states")
+
+
+class PortfolioBook(Base):
+    __tablename__ = "portfolio_books"
+    __table_args__ = (
+        UniqueConstraint("scope_kind", "scope_id", name="uq_portfolio_book_scope"),
+        Index("ix_portfolio_book_skill_scope", "skill_id", "scope_kind", "scope_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_id: Mapped[str] = mapped_column(String(32), index=True)
+    initial_capital: Mapped[float] = mapped_column(Float)
+    cash_balance: Mapped[float] = mapped_column(Float)
+    equity: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    last_mark_time_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    skill: Mapped[Skill] = relationship(back_populates="portfolio_books")
+    positions: Mapped[list[PortfolioPosition]] = relationship(back_populates="book")
+    fills: Mapped[list[PortfolioFill]] = relationship(back_populates="book")
+
+
+class PortfolioPosition(Base):
+    __tablename__ = "portfolio_positions"
+    __table_args__ = (
+        UniqueConstraint("book_id", "market_symbol", name="uq_portfolio_position_book_symbol"),
+        Index("ix_portfolio_position_book_symbol", "book_id", "market_symbol"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    book_id: Mapped[str] = mapped_column(ForeignKey("portfolio_books.id"), index=True)
+    market_symbol: Mapped[str] = mapped_column(String(128), index=True)
+    direction: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_entry_price: Mapped[float] = mapped_column(Float)
+    mark_price: Mapped[float] = mapped_column(Float, default=0.0)
+    position_notional: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    cycle_realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    stop_loss_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    take_profit_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    opened_at_ms: Mapped[int] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger)
+
+    book: Mapped[PortfolioBook] = relationship(back_populates="positions")
+
+
+class PortfolioFill(Base):
+    __tablename__ = "portfolio_fills"
+    __table_args__ = (
+        Index("ix_portfolio_fill_book_time", "book_id", "trigger_time_ms"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    book_id: Mapped[str] = mapped_column(ForeignKey("portfolio_books.id"), index=True)
+    market_symbol: Mapped[str] = mapped_column(String(128), index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    notional: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    closed_trade_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    closed_trade_win: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    trigger_time_ms: Mapped[int] = mapped_column(BigInteger, index=True)
+    trace_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    execution_reference: Mapped[str] = mapped_column(String(64), default="portfolio_book_fill")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    book: Mapped[PortfolioBook] = relationship(back_populates="fills")
+
+
+class TraceExecutionDetail(Base):
+    __tablename__ = "trace_execution_details"
+    __table_args__ = (
+        UniqueConstraint("trace_id", name="uq_trace_execution_detail_trace"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(ForeignKey("run_traces.id"), index=True)
+    portfolio_before_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    portfolio_after_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    fills_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    mark_prices_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    trace: Mapped[RunTrace] = relationship(back_populates="execution_detail")
 
 
 class MarketCandle(Base):

@@ -1,13 +1,15 @@
 from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import MarketCandle, StrategyState
-from app.services.market_data_store import build_market_snapshot, fetch_candles, has_market_data
-from app.services.utils import ensure_utc, new_id, utc_now
+from app.models import MarketCandle
+from app.services.market_data_store import build_market_snapshot, fetch_candles
+from app.services.portfolio_engine import PortfolioEngine
+from app.services.utils import ensure_utc, new_id
 from app.tool_gateway.market_handlers import (
     handle_get_candles,
     handle_get_funding_rate,
@@ -15,60 +17,48 @@ from app.tool_gateway.market_handlers import (
     handle_market_metadata,
     handle_scan_market,
 )
+from app.tool_gateway.portfolio_handlers import handle_get_portfolio_state
 from app.tool_gateway.signal_handlers import handle_signal_intent
 from app.tool_gateway.state_handlers import handle_get_strategy_state, handle_save_strategy_state
 
 
-FALLBACK_SYMBOLS = [
-    "DOGE-USDT-SWAP",
-    "WIF-USDT-SWAP",
-    "SOL-USDT-SWAP",
-    "PEPE-USDT-SWAP",
-]
-
-
 def build_market_snapshot_for_backtest(db: Session, as_of: datetime, step_index: int) -> dict[str, Any]:
-    if has_market_data(db):
-        snapshot = build_market_snapshot(db, as_of)
-        if snapshot["market_candidates"]:
-            snapshot["provider"] = "historical_db"
-            return snapshot
-    return _build_fallback_snapshot(step_index)
+    del step_index
+    return _build_strict_snapshot(db, as_of)
 
 
 def build_market_snapshot_for_live(db: Session) -> dict[str, Any]:
     latest_open_time_ms = db.scalar(select(func.max(MarketCandle.open_time_ms)).select_from(MarketCandle))
-    if latest_open_time_ms is not None:
-        as_of = datetime.fromtimestamp(latest_open_time_ms / 1000, tz=timezone.utc)
-        snapshot = build_market_snapshot(db, as_of)
-        if snapshot["market_candidates"]:
-            snapshot["provider"] = "historical_db"
-            return snapshot
-    return _build_fallback_snapshot(0)
+    if latest_open_time_ms is None:
+        return {
+            "market_candidates": [],
+            "provider": "historical_db",
+            "as_of_ms": None,
+            "error": "No historical market data is available. Import CSV data first.",
+        }
+    as_of = datetime.fromtimestamp(latest_open_time_ms / 1000, tz=timezone.utc)
+    return _build_strict_snapshot(db, as_of)
 
 
-def get_strategy_state(db: Session, skill_id: str) -> dict[str, Any]:
-    state = db.scalar(select(StrategyState).where(StrategyState.skill_id == skill_id))
-    if state is None:
-        state = StrategyState(id=new_id("state"), skill_id=skill_id, state_json={})
-        db.add(state)
-        db.commit()
-        db.refresh(state)
-    return state.state_json or {}
-
-
-def save_strategy_state(db: Session, skill_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-    state = db.scalar(select(StrategyState).where(StrategyState.skill_id == skill_id))
-    if state is None:
-        state = StrategyState(id=new_id("state"), skill_id=skill_id, state_json={})
-        db.add(state)
-        db.flush()
-    next_state = dict(state.state_json or {})
-    next_state.update(patch)
-    state.state_json = next_state
+def get_strategy_state(db: Session, *, skill_id: str, scope_kind: str, scope_id: str) -> dict[str, Any]:
+    engine = PortfolioEngine(db, skill_id=skill_id, scope_kind=scope_kind, scope_id=scope_id)
+    state = engine.get_strategy_state()
     db.commit()
-    db.refresh(state)
-    return next_state
+    return state
+
+
+def save_strategy_state(
+    db: Session,
+    *,
+    skill_id: str,
+    scope_kind: str,
+    scope_id: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    engine = PortfolioEngine(db, skill_id=skill_id, scope_kind=scope_kind, scope_id=scope_id)
+    state = engine.save_strategy_state(patch)
+    db.commit()
+    return state
 
 
 def get_candles_tool(db: Session, market_symbol: str, timeframe: str, limit: int, end_time: datetime | None = None) -> list[dict[str, Any]]:
@@ -80,6 +70,8 @@ def execute_tool_gateway_request(
     *,
     tool_name: str,
     skill_id: str,
+    scope_kind: str,
+    scope_id: str,
     mode: str,
     trigger_time: datetime,
     arguments: dict[str, Any],
@@ -98,10 +90,30 @@ def execute_tool_gateway_request(
         )
 
     if tool_name == "get_strategy_state":
-        return handle_get_strategy_state(db, skill_id=skill_id)
+        return handle_get_strategy_state(
+            db,
+            skill_id=skill_id,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+        )
+
+    if tool_name == "get_portfolio_state":
+        return handle_get_portfolio_state(
+            db,
+            skill_id=skill_id,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            as_of=effective_as_of,
+        )
 
     if tool_name == "save_strategy_state":
-        return handle_save_strategy_state(db, skill_id=skill_id, patch=arguments.get("patch") or {})
+        return handle_save_strategy_state(
+            db,
+            skill_id=skill_id,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            patch=arguments.get("patch") or {},
+        )
 
     if tool_name == "get_market_metadata":
         return handle_market_metadata(
@@ -118,7 +130,7 @@ def execute_tool_gateway_request(
             as_of=effective_as_of,
             market_symbol=str(arguments.get("market_symbol") or ""),
             timeframe=str(arguments.get("timeframe") or "").strip().lower(),
-            limit=max(1, min(int(arguments.get("limit", 80) or 80), 200)),
+            limit=max(1, min(int(arguments.get("limit", 80) or 80), 240)),
         )
 
     if tool_name in {"get_funding_rate", "get_open_interest"}:
@@ -151,37 +163,9 @@ def execute_tool_gateway_request(
     return {"status": "unsupported", "content": {"error": f"Unsupported tool: {tool_name}"}}
 
 
-def _build_fallback_snapshot(step_index: int) -> dict[str, Any]:
-    candidates: list[dict[str, Any]] = []
-    for offset, symbol in enumerate(FALLBACK_SYMBOLS):
-        signal_index = step_index + (offset * 2)
-        change_24h_pct = round(0.05 + ((signal_index * 7) % 24) / 100.0, 4)
-        funding_rate = round(0.0003 + ((signal_index * 3) % 8) / 10000.0, 5)
-        open_interest_change_24h_pct = round(0.03 + ((signal_index * 5) % 14) / 100.0, 4)
-        volume_24h_usd = 15_000_000 + ((signal_index * 13) % 25) * 2_500_000
-        last_price = round(0.25 + offset * 0.18 + signal_index * 0.01, 4)
-        candidates.append(
-            {
-                "symbol": symbol,
-                "base_symbol": symbol,
-                "last_price": last_price,
-                "change_24h_pct": change_24h_pct,
-                "volume_24h_usd": volume_24h_usd,
-                "funding_rate": funding_rate,
-                "open_interest_change_24h_pct": open_interest_change_24h_pct,
-                "is_old_contract": False,
-            }
-        )
-    return {"market_candidates": candidates, "provider": "synthetic_fallback", "as_of": utc_now().isoformat()}
-
-
 def build_market_snapshot_for_tool_request(db: Session, as_of: datetime, step_index: int) -> dict[str, Any]:
-    if has_market_data(db):
-        snapshot = build_market_snapshot(db, as_of)
-        if snapshot["market_candidates"]:
-            snapshot["provider"] = "historical_db"
-            return snapshot
-    return _build_fallback_snapshot(step_index)
+    del step_index
+    return _build_strict_snapshot(db, as_of)
 
 
 def candidate_from_snapshot(snapshot: dict[str, Any], market_symbol: str | None) -> dict[str, Any] | None:
@@ -227,3 +211,13 @@ def resolve_market_symbol_for_gateway(db: Session, raw_symbol: Any) -> str:
         return related_match
 
     return base_symbol
+
+
+def _build_strict_snapshot(db: Session, as_of: datetime) -> dict[str, Any]:
+    normalized_as_of = ensure_utc(as_of)
+    snapshot = build_market_snapshot(db, normalized_as_of)
+    snapshot["provider"] = "historical_db"
+    if snapshot["market_candidates"]:
+        return snapshot
+    snapshot["error"] = f"No historical market snapshot is available as of {normalized_as_of.isoformat()}."
+    return snapshot

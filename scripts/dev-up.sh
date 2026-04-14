@@ -168,6 +168,7 @@ require_cmd curl
 require_cmd lsof
 require_cmd npm
 require_file "$ROOT/.venv/bin/python"
+require_file "$ROOT/scripts/check_runner_env.py"
 require_file "$ROOT/apps/api/.env"
 require_file "$ROOT/services/agent-runner/.env"
 require_file "$ROOT/apps/web/.env.local"
@@ -176,6 +177,9 @@ if [[ ! -d "$ROOT/apps/web/node_modules" ]]; then
   log "missing web dependencies at $ROOT/apps/web/node_modules; run 'make web-install' first"
   exit 1
 fi
+
+log "running Agent Runner environment checks"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/check_runner_env.py"
 
 start_service \
   runner \

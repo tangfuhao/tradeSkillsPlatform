@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.schemas import BacktestCreateRequest, BacktestResponse, TraceResponse
+from app.schemas import BacktestCreateRequest, BacktestResponse, PortfolioStateResponse, TraceResponse
 from app.services.backtest_service import BacktestService, execute_backtest_job
 
 
@@ -60,5 +60,14 @@ def get_backtest_traces(run_id: str, db: Session = Depends(get_db)) -> list[Trac
     service = BacktestService(db)
     try:
         return [TraceResponse.model_validate(item) for item in service.get_traces(run_id)]
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/{run_id}/portfolio", response_model=PortfolioStateResponse)
+def get_backtest_portfolio(run_id: str, db: Session = Depends(get_db)) -> PortfolioStateResponse:
+    service = BacktestService(db)
+    try:
+        return PortfolioStateResponse.model_validate(service.get_portfolio(run_id))
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

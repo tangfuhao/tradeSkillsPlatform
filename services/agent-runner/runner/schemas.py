@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -10,10 +10,14 @@ class ExecuteRunRequest(BaseModel):
     skill_id: str | None = None
     skill_title: str | None = None
     mode: Literal["backtest", "live_signal"]
-    trigger_time: datetime
+    trigger_time_ms: int
     skill_text: str = Field(min_length=20)
     envelope: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def trigger_time(self) -> datetime:
+        return datetime.fromtimestamp(self.trigger_time_ms / 1000, tz=timezone.utc)
 
 
 class RiskTarget(BaseModel):

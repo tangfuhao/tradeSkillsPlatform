@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
 from app.runtime.scheduler import scheduler_manager
 from app.services.market_data_sync import run_startup_market_data_sync
-from app.services.utils import utc_now
+from app.services.utils import datetime_to_ms, utc_now
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "service": settings.app_name,
-            "server_time": utc_now().isoformat(),
+            "server_time_ms": datetime_to_ms(utc_now()),
         }
 
     app.include_router(api_router, prefix=settings.api_prefix)

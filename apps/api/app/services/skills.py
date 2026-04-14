@@ -20,19 +20,10 @@ def create_skill(db: Session, title: str | None, skill_text: str) -> dict:
         raw_text=skill_text,
         source_hash=f"sha256:{hashlib.sha256(skill_text.encode('utf-8')).hexdigest()}",
         validation_status="passed",
-        review_status="preview_ready",
         envelope_json=extraction.envelope,
         validation_errors_json=extraction.errors,
         validation_warnings_json=extraction.warnings,
     )
-    db.add(skill)
-    db.commit()
-    db.refresh(skill)
-    return skill_to_dict(skill)
-
-
-def update_review_status(db: Session, skill: Skill, review_status: str) -> dict:
-    skill.review_status = review_status
     db.add(skill)
     db.commit()
     db.refresh(skill)

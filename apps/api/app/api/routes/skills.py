@@ -4,9 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import Skill
-from app.schemas import SkillCreateRequest, SkillResponse, SkillReviewUpdateRequest
+from app.schemas import SkillCreateRequest, SkillResponse
 from app.services.serializers import skill_to_dict
-from app.services.skills import create_skill, update_review_status
+from app.services.skills import create_skill
 
 
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -33,15 +33,3 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillResponse:
     if skill is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
     return SkillResponse.model_validate(skill_to_dict(skill))
-
-
-@router.post("/{skill_id}/review-state", response_model=SkillResponse)
-def update_review_state_route(
-    skill_id: str,
-    payload: SkillReviewUpdateRequest,
-    db: Session = Depends(get_db),
-) -> SkillResponse:
-    skill = db.get(Skill, skill_id)
-    if skill is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found.")
-    return SkillResponse.model_validate(update_review_status(db, skill, payload.review_status))

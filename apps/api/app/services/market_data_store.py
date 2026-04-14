@@ -98,7 +98,6 @@ def aggregate_rows(rows: list[MarketCandle], timeframe: str) -> list[dict[str, A
                 "base_symbol": row.base_symbol,
                 "timeframe": timeframe,
                 "open_time_ms": bucket_ms,
-                "open_time": ms_to_datetime(bucket_ms),
                 "open": row.open,
                 "high": row.high,
                 "low": row.low,
@@ -125,7 +124,6 @@ def serialize_candle(row: MarketCandle) -> dict[str, Any]:
         "base_symbol": row.base_symbol,
         "timeframe": row.timeframe,
         "open_time_ms": row.open_time_ms,
-        "open_time": ms_to_datetime(row.open_time_ms),
         "open": row.open,
         "high": row.high,
         "low": row.low,
@@ -172,7 +170,7 @@ def build_market_snapshot(db: Session, as_of: datetime, limit: int | None = None
                 "funding_rate": 0.0,
                 "open_interest_change_24h_pct": 0.0,
                 "is_old_contract": last.is_old_contract,
-                "as_of": ms_to_datetime(last.open_time_ms).isoformat(),
+                "as_of_ms": last.open_time_ms,
             }
         )
     candidates.sort(key=lambda item: (item["volume_24h_usd"], abs(item["change_24h_pct"])), reverse=True)
@@ -180,8 +178,19 @@ def build_market_snapshot(db: Session, as_of: datetime, limit: int | None = None
     return {
         "market_candidates": selected,
         "source": "historical_db",
-        "as_of": as_of.isoformat(),
+        "as_of_ms": as_of_ms,
     }
+
+
+def get_market_data_coverage(db: Session) -> tuple[datetime | None, datetime | None]:
+    min_max = db.execute(
+        select(func.min(MarketCandle.open_time_ms), func.max(MarketCandle.open_time_ms))
+    ).one()
+    start_ms, end_ms = min_max
+    return (
+        ms_to_datetime(start_ms) if start_ms is not None else None,
+        ms_to_datetime(end_ms) if end_ms is not None else None,
+    )
 
 
 def has_market_data(db: Session) -> bool:
@@ -191,9 +200,7 @@ def has_market_data(db: Session) -> bool:
 def get_market_overview(db: Session) -> dict[str, Any]:
     total_candles = db.scalar(select(func.count()).select_from(MarketCandle)) or 0
     total_symbols = db.scalar(select(func.count(func.distinct(MarketCandle.market_symbol))).select_from(MarketCandle)) or 0
-    min_max = db.execute(
-        select(func.min(MarketCandle.open_time_ms), func.max(MarketCandle.open_time_ms))
-    ).one()
+    coverage_start, coverage_end = get_market_data_coverage(db)
     jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.started_at.desc()).limit(10)).all()
     cursors = db.scalars(select(MarketSyncCursor).order_by(MarketSyncCursor.base_symbol.asc())).all()
     return {
@@ -201,8 +208,8 @@ def get_market_overview(db: Session) -> dict[str, Any]:
         "base_timeframe": settings.historical_base_timeframe,
         "total_candles": total_candles,
         "total_symbols": total_symbols,
-        "coverage_start": ms_to_datetime(min_max[0]).isoformat() if min_max[0] else None,
-        "coverage_end": ms_to_datetime(min_max[1]).isoformat() if min_max[1] else None,
+        "coverage_start_ms": datetime_to_ms(coverage_start) if coverage_start else None,
+        "coverage_end_ms": datetime_to_ms(coverage_end) if coverage_end else None,
         "recent_csv_jobs": [
             {
                 "id": job.id,
@@ -211,9 +218,9 @@ def get_market_overview(db: Session) -> dict[str, Any]:
                 "rows_seen": job.rows_seen,
                 "rows_inserted": job.rows_inserted,
                 "rows_filtered": job.rows_filtered,
-                "coverage_start": ms_to_datetime(job.coverage_start_ms).isoformat() if job.coverage_start_ms else None,
-                "coverage_end": ms_to_datetime(job.coverage_end_ms).isoformat() if job.coverage_end_ms else None,
-                "completed_at": job.completed_at,
+                "coverage_start_ms": job.coverage_start_ms,
+                "coverage_end_ms": job.coverage_end_ms,
+                "completed_at_ms": datetime_to_ms(job.completed_at) if job.completed_at else None,
                 "error_message": job.error_message,
             }
             for job in jobs
@@ -224,10 +231,9 @@ def get_market_overview(db: Session) -> dict[str, Any]:
                 "timeframe": cursor.timeframe,
                 "status": cursor.status,
                 "last_synced_open_time_ms": cursor.last_synced_open_time_ms,
-                "last_synced_open_time": ms_to_datetime(cursor.last_synced_open_time_ms).isoformat()
-                if cursor.last_synced_open_time_ms
+                "last_sync_completed_at_ms": datetime_to_ms(cursor.last_sync_completed_at)
+                if cursor.last_sync_completed_at
                 else None,
-                "last_sync_completed_at": cursor.last_sync_completed_at,
                 "notes": cursor.notes_json or {},
             }
             for cursor in cursors

@@ -1,7 +1,8 @@
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
+VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 
-.PHONY: api-install api-dev runner-install runner-dev web-install web-dev dev-up dev-down dev-status smoke-python smoke-web-json
+.PHONY: api-install api-dev runner-install runner-dev runner-check smoke-runner-provider web-install web-dev dev-up dev-down dev-status smoke-python smoke-web-json
 
 api-install:
 	cd apps/api && $(PIP) install -r requirements.txt
@@ -14,6 +15,12 @@ runner-install:
 
 runner-dev:
 	cd services/agent-runner && uvicorn runner.main:app --reload --host 0.0.0.0 --port 8100
+
+runner-check:
+	$(VENV_PYTHON) scripts/check_runner_env.py
+
+smoke-runner-provider:
+	$(VENV_PYTHON) scripts/smoke_runner_provider.py
 
 web-install:
 	cd apps/web && npm install
@@ -31,7 +38,8 @@ dev-status:
 	./scripts/dev-status.sh
 
 smoke-python:
-	$(PYTHON) -m compileall apps/api/app services/agent-runner/runner
+	$(VENV_PYTHON) scripts/check_runner_env.py
+	$(VENV_PYTHON) -m compileall apps/api/app services/agent-runner/runner
 
 smoke-web-json:
 	$(PYTHON) -m json.tool apps/web/package.json >/dev/null

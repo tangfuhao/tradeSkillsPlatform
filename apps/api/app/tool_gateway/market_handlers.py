@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.services.market_data_store import fetch_candles
-from app.services.utils import ensure_utc
+from app.services.utils import datetime_to_ms, ensure_utc
 
 
 SORT_ALIASES = {
@@ -35,13 +35,24 @@ def handle_scan_market(
     normalized_sort = SORT_ALIASES.get(sort_by, sort_by)
     candidates = list(snapshot.get("market_candidates", []))
     candidates.sort(key=lambda item: float(item.get(normalized_sort, 0.0) or 0.0), reverse=True)
+    if not candidates:
+        return {
+            "status": "not_available",
+            "content": {
+                "count": 0,
+                "candidates": [],
+                "source": snapshot.get("provider") or snapshot.get("source"),
+                "as_of_ms": snapshot.get("as_of_ms"),
+                "error": snapshot.get("error") or f"No market candidates are available as of {datetime_to_ms(ensure_utc(as_of))}.",
+            },
+        }
     return {
         "status": "ok",
         "content": {
             "count": len(candidates[:top_n]),
             "candidates": candidates[:top_n],
             "source": snapshot.get("provider") or snapshot.get("source"),
-            "as_of": snapshot.get("as_of"),
+            "as_of_ms": snapshot.get("as_of_ms"),
         },
     }
 
@@ -59,12 +70,24 @@ def handle_market_metadata(
     resolved_symbol = resolve_market_symbol_for_gateway(db, market_symbol)
     snapshot = build_market_snapshot_for_tool_request(db, ensure_utc(as_of), trace_index or 0)
     candidate = candidate_from_snapshot(snapshot, resolved_symbol)
+    if candidate is None:
+        return {
+            "status": "not_available",
+            "content": {
+                "market_symbol": resolved_symbol,
+                "candidate": None,
+                "as_of_ms": snapshot.get("as_of_ms"),
+                "source": snapshot.get("provider") or snapshot.get("source"),
+                "mode": mode,
+                "error": snapshot.get("error") or f"No market metadata is available for {resolved_symbol}.",
+            },
+        }
     return {
         "status": "ok",
         "content": {
             "market_symbol": resolved_symbol,
             "candidate": candidate,
-            "as_of": snapshot.get("as_of"),
+            "as_of_ms": snapshot.get("as_of_ms"),
             "source": snapshot.get("provider") or snapshot.get("source"),
             "mode": mode,
         },
@@ -96,7 +119,7 @@ def handle_get_candles(
                 "error": f"No candles found for {resolved_symbol} {timeframe}",
                 "market_symbol": resolved_symbol,
                 "timeframe": timeframe,
-                "as_of": ensure_utc(as_of).isoformat(),
+                "as_of_ms": datetime_to_ms(ensure_utc(as_of)),
             },
         }
 
@@ -116,7 +139,7 @@ def handle_get_candles(
             "summary": summary,
             "candles": [
                 {
-                    "open_time": row["open_time"].isoformat() if hasattr(row["open_time"], "isoformat") else row["open_time"],
+                    "open_time_ms": row["open_time_ms"],
                     "open": row["open"],
                     "high": row["high"],
                     "low": row["low"],

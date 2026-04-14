@@ -1,26 +1,20 @@
 from __future__ import annotations
 
 from app.models import BacktestRun, LiveSignal, LiveTask, RunTrace, Skill
-from app.services.preview_policy import get_preview_window
+from app.services.utils import datetime_to_ms
 
 
 def skill_to_dict(skill: Skill) -> dict:
-    preview_start, preview_end = get_preview_window()
     return {
         "id": skill.id,
         "title": skill.title,
         "validation_status": skill.validation_status,
-        "review_status": skill.review_status,
         "source_hash": skill.source_hash,
         "envelope": skill.envelope_json or {},
         "validation_errors": skill.validation_errors_json or [],
         "validation_warnings": skill.validation_warnings_json or [],
-        "preview_window": {
-            "start": preview_start,
-            "end": preview_end,
-        },
-        "created_at": skill.created_at,
-        "updated_at": skill.updated_at,
+        "created_at_ms": datetime_to_ms(skill.created_at),
+        "updated_at_ms": datetime_to_ms(skill.updated_at),
     }
 
 
@@ -31,24 +25,28 @@ def backtest_to_dict(run: BacktestRun) -> dict:
         "status": run.status,
         "scope": run.scope,
         "benchmark_name": run.benchmark_name,
-        "start_time": run.start_time,
-        "end_time": run.end_time,
+        "start_time_ms": datetime_to_ms(run.start_time),
+        "end_time_ms": datetime_to_ms(run.end_time),
         "initial_capital": run.initial_capital,
         "summary": run.summary_json,
         "error_message": run.error_message,
-        "created_at": run.created_at,
-        "updated_at": run.updated_at,
+        "created_at_ms": datetime_to_ms(run.created_at),
+        "updated_at_ms": datetime_to_ms(run.updated_at),
     }
 
 
 def trace_to_dict(trace: RunTrace) -> dict:
+    execution_detail = trace.execution_detail
     return {
         "id": trace.id,
         "trace_index": trace.trace_index,
-        "trigger_time": trace.trigger_time,
+        "trigger_time_ms": datetime_to_ms(trace.trigger_time),
         "reasoning_summary": trace.reasoning_summary,
         "decision": trace.decision_json or {},
         "tool_calls": trace.tool_calls_json or [],
+        "portfolio_before": execution_detail.portfolio_before_json if execution_detail else None,
+        "portfolio_after": execution_detail.portfolio_after_json if execution_detail else None,
+        "fills": execution_detail.fills_json if execution_detail else [],
     }
 
 
@@ -59,9 +57,9 @@ def live_task_to_dict(task: LiveTask) -> dict:
         "status": task.status,
         "cadence": task.cadence,
         "cadence_seconds": task.cadence_seconds,
-        "last_triggered_at": task.last_triggered_at,
-        "created_at": task.created_at,
-        "updated_at": task.updated_at,
+        "last_triggered_at_ms": datetime_to_ms(task.last_triggered_at) if task.last_triggered_at else None,
+        "created_at_ms": datetime_to_ms(task.created_at),
+        "updated_at_ms": datetime_to_ms(task.updated_at),
     }
 
 
@@ -69,8 +67,8 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
     return {
         "id": signal.id,
         "live_task_id": signal.live_task_id,
-        "trigger_time": signal.trigger_time,
+        "trigger_time_ms": datetime_to_ms(signal.trigger_time),
         "delivery_status": signal.delivery_status,
         "signal": signal.signal_json or {},
-        "created_at": signal.created_at,
+        "created_at_ms": datetime_to_ms(signal.created_at),
     }

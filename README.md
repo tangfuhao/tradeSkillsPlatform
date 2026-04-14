@@ -170,9 +170,10 @@ See `infra/env/api.env.example`, especially:
 See `infra/env/agent-runner.env.example`, especially:
 
 - `AGENT_RUNNER_ALLOWED_ORIGINS`
+- `AGENT_RUNNER_OPENAI_API_KEY`
+- `AGENT_RUNNER_OPENAI_BASE_URL`
 - `AGENT_RUNNER_OPENAI_MODEL`
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
+- `AGENT_RUNNER_OPENAI_WIRE_API`
 
 ## Useful commands
 
