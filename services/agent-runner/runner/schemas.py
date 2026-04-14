@@ -20,6 +20,15 @@ class ExecuteRunRequest(BaseModel):
         return datetime.fromtimestamp(self.trigger_time_ms / 1000, tz=timezone.utc)
 
 
+class SkillEnvelopeExtractRequest(BaseModel):
+    skill_text: str = Field(min_length=20)
+    title_override: str | None = None
+    rule_envelope: dict[str, Any] = Field(default_factory=dict)
+    rule_errors: list[str] = Field(default_factory=list)
+    rule_warnings: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+
+
 class RiskTarget(BaseModel):
     type: str
     value: float
@@ -46,4 +55,13 @@ class ExecuteRunResponse(BaseModel):
     decision: AgentDecision
     reasoning_summary: str
     tool_calls: list[ToolCallSummary]
+    provider: str
+
+
+class SkillEnvelopeExtractResponse(BaseModel):
+    title: str | None = None
+    envelope_patch: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    unresolved_fields: list[str] = Field(default_factory=list)
+    reasoning_summary: str
     provider: str

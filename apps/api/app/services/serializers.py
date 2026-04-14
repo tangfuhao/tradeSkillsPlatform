@@ -5,12 +5,18 @@ from app.services.utils import datetime_to_ms
 
 
 def skill_to_dict(skill: Skill) -> dict:
+    envelope = skill.envelope_json or {}
+    extraction_meta = envelope.get("extraction_meta") if isinstance(envelope, dict) else {}
+    extraction_method = str((extraction_meta or {}).get("method") or "rule_only")
+    fallback_used = bool((extraction_meta or {}).get("fallback_used") or extraction_method == "llm_fallback")
     return {
         "id": skill.id,
         "title": skill.title,
         "validation_status": skill.validation_status,
         "source_hash": skill.source_hash,
-        "envelope": skill.envelope_json or {},
+        "envelope": envelope,
+        "extraction_method": extraction_method,
+        "fallback_used": fallback_used,
         "validation_errors": skill.validation_errors_json or [],
         "validation_warnings": skill.validation_warnings_json or [],
         "created_at_ms": datetime_to_ms(skill.created_at),

@@ -14,6 +14,13 @@ export type SkillEnvelope = {
   risk_contract?: {
     max_position_pct?: number;
   };
+  extraction_meta?: {
+    method?: 'rule_only' | 'llm_fallback';
+    fallback_used?: boolean;
+    provider?: string;
+    reasoning_summary?: string;
+    rule_failure_reasons?: string[];
+  };
 };
 
 export type Skill = {
@@ -22,6 +29,10 @@ export type Skill = {
   validation_status: string;
   source_hash: string;
   envelope: SkillEnvelope;
+  extraction_method: 'rule_only' | 'llm_fallback';
+  fallback_used: boolean;
+  validation_errors: string[];
+  validation_warnings: string[];
   created_at_ms: number;
   updated_at_ms: number;
 };

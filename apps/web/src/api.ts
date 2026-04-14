@@ -1,3 +1,5 @@
+import type { BacktestRun, BacktestTrace, LiveSignal, LiveTask, MarketOverview, Skill } from './types';
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const agentRunnerBaseUrl = import.meta.env.VITE_AGENT_RUNNER_BASE_URL ?? 'http://localhost:8100';
 
@@ -51,22 +53,22 @@ export async function getAgentRunnerHealth(): Promise<any> {
   return readJson(`${agentRunnerBaseUrl}/healthz`);
 }
 
-export async function listSkills(): Promise<any[]> {
+export async function listSkills(): Promise<Skill[]> {
   return readJson(`${apiBaseUrl}/api/v1/skills`);
 }
 
-export async function createSkill(payload: { title?: string; skill_text: string }): Promise<any> {
+export async function createSkill(payload: { title?: string; skill_text: string }): Promise<Skill> {
   return readJson(`${apiBaseUrl}/api/v1/skills`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function listBacktests(): Promise<any[]> {
+export async function listBacktests(): Promise<BacktestRun[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`);
 }
 
-export async function listBacktestTraces(runId: string): Promise<any[]> {
+export async function listBacktestTraces(runId: string): Promise<BacktestTrace[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/traces`);
 }
 
@@ -77,27 +79,27 @@ export async function createBacktest(payload: { skill_id: string; start_time_ms:
   });
 }
 
-export async function listLiveTasks(): Promise<any[]> {
+export async function listLiveTasks(): Promise<LiveTask[]> {
   return readJson(`${apiBaseUrl}/api/v1/live-tasks`);
 }
 
-export async function createLiveTask(payload: { skill_id: string }): Promise<any> {
+export async function createLiveTask(payload: { skill_id: string }): Promise<LiveTask> {
   return readJson(`${apiBaseUrl}/api/v1/live-tasks`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function triggerLiveTask(taskId: string): Promise<any> {
+export async function triggerLiveTask(taskId: string): Promise<LiveSignal> {
   return readJson(`${apiBaseUrl}/api/v1/live-tasks/${taskId}/trigger`, {
     method: 'POST',
   });
 }
 
-export async function listSignals(): Promise<any[]> {
+export async function listSignals(): Promise<LiveSignal[]> {
   return readJson(`${apiBaseUrl}/api/v1/live-signals`);
 }
 
-export async function getMarketOverview(): Promise<any> {
+export async function getMarketOverview(): Promise<MarketOverview> {
   return readJson(`${apiBaseUrl}/api/v1/market-data/overview`);
 }

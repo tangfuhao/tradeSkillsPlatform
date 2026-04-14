@@ -584,6 +584,8 @@ def _stream_response_round(
     client: OpenAI,
     *,
     conversation_items: list[dict[str, Any]],
+    system_prompt: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> StreamRoundResult:
     if settings.openai_wire_api != "responses":
         raise RuntimeError(f"Unsupported wire API: {settings.openai_wire_api}")
@@ -591,8 +593,8 @@ def _stream_response_round(
     request_payload = build_responses_request_payload(
         model_name=settings.openai_model,
         conversation_items=conversation_items,
-        system_prompt=_system_prompt(),
-        tools=_tool_definitions(),
+        system_prompt=_system_prompt() if system_prompt is None else system_prompt,
+        tools=_tool_definitions() if tools is None else tools,
         stream=True,
     )
 

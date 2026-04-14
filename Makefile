@@ -1,17 +1,21 @@
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
+VENV_DIR ?= $(CURDIR)/.venv
 VENV_PYTHON ?= $(CURDIR)/.venv/bin/python
 
-.PHONY: api-install api-dev runner-install runner-dev runner-check smoke-runner-provider web-install web-dev dev-up dev-down dev-status smoke-python smoke-web-json
+.PHONY: bootstrap api-install api-dev runner-install runner-dev runner-check smoke-runner-provider web-install web-dev dev-up dev-down dev-status smoke-python smoke-web-json
+
+bootstrap:
+	./scripts/bootstrap-dev.sh
 
 api-install:
-	cd apps/api && $(PIP) install -r requirements.txt
+	./scripts/bootstrap-dev.sh
 
 api-dev:
 	cd apps/api && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 runner-install:
-	cd services/agent-runner && $(PIP) install -r requirements.txt
+	./scripts/bootstrap-dev.sh
 
 runner-dev:
 	cd services/agent-runner && uvicorn runner.main:app --reload --host 0.0.0.0 --port 8100
@@ -23,7 +27,7 @@ smoke-runner-provider:
 	$(VENV_PYTHON) scripts/smoke_runner_provider.py
 
 web-install:
-	cd apps/web && npm install
+	./scripts/bootstrap-dev.sh
 
 web-dev:
 	cd apps/web && npm run dev -- --host 0.0.0.0 --port 5173

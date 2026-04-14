@@ -167,16 +167,17 @@ start_service() {
 require_cmd curl
 require_cmd lsof
 require_cmd npm
-require_file "$ROOT/.venv/bin/python"
+require_cmd python3
+require_file "$ROOT/scripts/bootstrap-dev.sh"
 require_file "$ROOT/scripts/check_runner_env.py"
 require_file "$ROOT/apps/api/.env"
 require_file "$ROOT/services/agent-runner/.env"
 require_file "$ROOT/apps/web/.env.local"
 require_file "$ROOT/apps/web/package.json"
-if [[ ! -d "$ROOT/apps/web/node_modules" ]]; then
-  log "missing web dependencies at $ROOT/apps/web/node_modules; run 'make web-install' first"
-  exit 1
-fi
+
+log "bootstrapping local environments and dependencies"
+"$ROOT/scripts/bootstrap-dev.sh"
+require_file "$ROOT/.venv/bin/python"
 
 log "running Agent Runner environment checks"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/check_runner_env.py"

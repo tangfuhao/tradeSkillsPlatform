@@ -4,8 +4,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from runner.config import settings
-from runner.schemas import ExecuteRunRequest, ExecuteRunResponse
+from runner.schemas import (
+    ExecuteRunRequest,
+    ExecuteRunResponse,
+    SkillEnvelopeExtractRequest,
+    SkillEnvelopeExtractResponse,
+)
 from runner.services.decision_engine import get_engine
+from runner.services.skill_envelope_runtime import OpenAISkillEnvelopeExtractionEngine
 from runner.services.startup_preflight import assert_startup_preflight
 
 
@@ -39,6 +45,17 @@ def execute_run(payload: ExecuteRunRequest) -> ExecuteRunResponse:
     engine = get_engine()
     try:
         return engine.execute(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/v1/skills/extract-envelope", response_model=SkillEnvelopeExtractResponse)
+def extract_skill_envelope(payload: SkillEnvelopeExtractRequest) -> SkillEnvelopeExtractResponse:
+    engine = OpenAISkillEnvelopeExtractionEngine()
+    try:
+        return engine.extract(payload)
     except HTTPException:
         raise
     except Exception as exc:

@@ -101,6 +101,11 @@ function translateToken(value?: string | null, dictionary: Record<string, string
   return dictionary[value] ?? value.replace(/_/g, ' ');
 }
 
+function describeExtractionMethod(value?: Skill['extraction_method']): string {
+  if (value === 'llm_fallback') return 'LLM 回退';
+  return '规则提取';
+}
+
 function formatTime(value?: number | null): string {
   if (typeof value !== 'number' || Number.isNaN(value)) return '--';
   const date = new Date(value);
@@ -455,7 +460,11 @@ export default function App() {
     try {
       const created = await createSkill({ skill_text: nextSkillText });
       setSelectedSkillId(created.id);
-      setMessage(`策略《${created.title}》已生成，可以直接用于历史回放和实时信号。`);
+      setMessage(
+        created.fallback_used
+          ? `策略《${created.title}》已生成；规则提取不足的部分已通过 LLM 回退补全，可直接用于历史回放和实时信号。`
+          : `策略《${created.title}》已生成，可以直接用于历史回放和实时信号。`,
+      );
       await refreshDashboard();
     } catch (error) {
       setMessage(`策略上传失败：${getErrorMessage(error)}`);
@@ -693,12 +702,21 @@ export default function App() {
                 </span>
               </div>
               <p>验证状态：{selectedSkill ? describeStatus(selectedSkill.validation_status) : '--'}</p>
+              <p>提取方式：{selectedSkill ? describeExtractionMethod(selectedSkill.extraction_method) : '--'}</p>
               <p>执行节奏：{selectedSkill?.envelope?.trigger?.value ?? '--'}</p>
               <p>
                 历史覆盖：{formatTime(marketOverview?.coverage_start_ms)} - {formatTime(marketOverview?.coverage_end_ms)}
               </p>
               <p>工具约束：{(selectedSkill?.envelope?.tool_contract?.required_tools ?? []).join('、') || '系统暂未抽取工具限制'}</p>
+              <p>提取说明：{selectedSkill?.envelope?.extraction_meta?.reasoning_summary ?? '当前版本没有额外提取说明。'}</p>
             </div>
+
+            {selectedSkill?.validation_warnings?.length ? (
+              <div className="info-box warning-box">
+                <p>提取提示</p>
+                <small>{selectedSkill.validation_warnings.join('；')}</small>
+              </div>
+            ) : null}
 
             <div className="info-box hint-box">
               <p>
@@ -779,7 +797,7 @@ export default function App() {
                   active={selectedSkill?.id === skill.id}
                   title={skill.title}
                   subtitle={describeStatus(skill.validation_status)}
-                  meta={`${skill.envelope?.trigger?.value ?? '--'} 节奏`}
+                  meta={`${skill.envelope?.trigger?.value ?? '--'} 节奏 / ${describeExtractionMethod(skill.extraction_method)}`}
                   badge={skill.envelope?.trigger?.value ?? '--'}
                   onClick={() => setSelectedSkillId(skill.id)}
                 />

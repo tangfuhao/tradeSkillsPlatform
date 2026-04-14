@@ -1,5 +1,7 @@
 # Skill Envelope 设计文档（V0.1 建议稿）
 
+> 注：本文最初是 V0.1 设计稿。当前运行代码已经采用“规则优先 + LLM fallback + 平台校验”的两段式抽取路径，但 v1 仍只暴露最小提取报告，不提供独立 extraction-report 资源。
+
 ## 1. 定位
 
 Skill Envelope 是平台从原始自然语言 Skill 中抽取出的“运行契约”。

@@ -33,14 +33,14 @@ tradeSkills/
 The current codebase is centered on a simple demo workflow:
 
 1. Upload a Markdown Skill.
-2. Validate required sections and extract a Skill Envelope.
+2. Run rule-first validation and Skill Envelope extraction, then fall back to an LLM-assisted patch only when deterministic extraction is incomplete.
 3. Run the Skill in `backtest` or `live_signal` mode.
 4. Persist traces, simulated portfolio state, and live signal records.
 5. Inspect results in the React dashboard.
 
 What works now:
 
-- Skill upload, validation, envelope extraction, and list/detail APIs
+- Skill upload, rule-first validation, hybrid envelope extraction, and list/detail APIs
 - Backtest creation, replay execution, summary retrieval, trace retrieval, and backtest portfolio inspection
 - Live task creation, periodic scheduling, manual triggering, recent signal retrieval, and live-task portfolio inspection
 - Blocking startup sync for operator-managed historical market data:
@@ -145,12 +145,18 @@ This is designed for a debug-heavy development machine where services restart of
 
 A valid Skill currently needs:
 
-- a title
+- a title (rule extraction may fall back to the Runner when the title is only implicit in natural language)
 - an identifiable execution cadence such as `Every 15 minutes` or `每 15 分钟`
 - an identifiable AI reasoning section
-- explicit risk-control guidance
+- explicit risk-control guidance plus explicit numeric hard limits for position size, daily drawdown, and concurrent positions
 
-If extraction succeeds, the API stores the raw Markdown and the extracted Skill Envelope. If extraction fails, upload is rejected with validation errors.
+The current upload flow is synchronous and hybrid:
+
+- first run deterministic rule extraction
+- if the rule result is incomplete, call the Agent Runner once for a JSON-only conservative patch
+- merge with rule-first precedence, apply platform defaults, and run shared-schema plus platform validation
+
+If extraction succeeds, the API stores the raw Markdown, the extracted Skill Envelope, and minimal extraction metadata. If extraction still fails, upload is rejected with validation errors.
 
 ### Backtest window rules
 
@@ -185,20 +191,15 @@ The current backtest and live runtime share the same `PortfolioEngine` model:
 
 ## Quick start
 
-1. Create a Python virtual environment at the repo root.
-2. Install the API dependencies.
-3. Install the Agent Runner dependencies.
-4. Install the web dependencies.
-5. Start the three services in separate terminals.
+Bootstrap the local virtual environment plus Python/web dependencies once:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+make bootstrap
+```
 
-make api-install
-make runner-install
-make web-install
+Then start the three services in separate terminals if you want foreground logs:
 
+```bash
 make runner-dev
 make api-dev
 make web-dev
@@ -219,6 +220,9 @@ make dev-up
 
 This will:
 
+- create `.venv` automatically when missing
+- install or refresh Python dependencies when either requirements file changes
+- install or refresh web dependencies when `package.json` or `package-lock.json` changes
 - read `apps/api/.env`, `services/agent-runner/.env`, and `apps/web/.env.local`
 - start all three services in the background
 - write PID files under `.dev/pids`

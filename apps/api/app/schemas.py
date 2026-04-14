@@ -18,6 +18,8 @@ class SkillResponse(BaseModel):
     validation_status: str
     source_hash: str
     envelope: dict[str, Any]
+    extraction_method: Literal["rule_only", "llm_fallback"] = "rule_only"
+    fallback_used: bool = False
     validation_errors: list[str]
     validation_warnings: list[str]
     created_at_ms: int
