@@ -1,5 +1,10 @@
 # 数据库实体设计（V0.1 建议稿）
 
+> 历史说明（请以代码为准）
+> - 本文保留的是早期数据模型方案，不代表当前 SQLite demo 的实际表结构。
+> - 当前模型定义以 `apps/api/app/models.py` 为准，核心对象是 `Skill`、`BacktestRun`、`RunTrace`、`LiveTask`、`LiveSignal`、`ExecutionStrategyState`、`PortfolioBook` / `PortfolioPosition` / `PortfolioFill`、`TraceExecutionDetail`、`MarketCandle`、`CsvIngestionJob`、`MarketSyncCursor`。
+> - `skills.review_status` 和 `strategy_states` 仍以遗留字段/表的形式存在，但当前运行路径使用的是执行域状态 `execution_strategy_states`，并没有 `strategy_version`、`review_request`、`export_bundle`、`run_manifest` 这些当前资源。
+
 ## 1. 目标
 
 这份文档定义首版 Agent 交易 Skills 平台的核心数据实体，用来支撑：

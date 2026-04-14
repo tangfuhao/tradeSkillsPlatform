@@ -1,5 +1,10 @@
 # 文本 Skill 模板规范（V0.1 建议稿）
 
+> 历史说明（请以代码为准）
+> - 本文保留的是较强约束的模板建议稿，不等同于当前上传校验规则。
+> - 当前代码的最小校验条件以 `apps/api/app/services/envelope_extractor.py` 为准：需要可识别标题、执行 cadence、AI reasoning 段落，以及明确的风险控制/止损信息。
+> - 当前实现不会把 Skill 编译成强约束 IR 模板，也没有 `preview -> review -> approved_full_window` 这套后续流转。
+
 ## 1. 目标
 
 这份文档定义首版 Agent 交易 Skill 的推荐文本格式，用于满足以下目标：

@@ -3,8 +3,8 @@
 TradeSkills is a single-machine demo platform for natural-language trading Skills.
 
 Users upload a Markdown Skill, the platform extracts a Skill Envelope, and the same Skill can run in two modes:
-- `backtest`: replay historical trigger times and simulate paper-trading behavior
-- `live_signal`: trigger periodic Agent runs and store structured trade signals
+- `backtest`: replay historical trigger times and simulate paper-trading behavior with the current portfolio engine
+- `live_signal`: trigger periodic Agent runs and store structured signal records for later inspection
 
 This repository is intentionally organized as a monorepo so the web app, API, and Agent Runner stay easy to debug on one public-IP development machine.
 
@@ -16,7 +16,7 @@ tradeSkills/
 |  |- api/                FastAPI app, SQLite demo persistence, startup sync, scheduler
 |  \- web/                Vite + React demo dashboard
 |- services/
-|  \- agent-runner/       Agent execution boundary with pluggable decision engine
+|  \- agent-runner/       Agent execution boundary with OpenAI Responses tool runtime
 |- packages/
 |  |- shared-schemas/     Shared JSON contracts for envelopes and decisions
 |  \- shared-skill-examples/
@@ -25,20 +25,94 @@ tradeSkills/
 |  \- env/                Example environment files
 |- data/
 |  \- runtime/            Local runtime storage
-\- openspec/              Product/spec artifacts
+\- openspec/              Product/spec artifacts and historical design notes
 ```
 
-## What works now
+## Current implementation scope
 
-- Skill upload, validation, envelope extraction, review-state update, and list/detail APIs
-- Backtest creation, replay execution, summary/traces retrieval, and live signal task activation
-- Blocking startup sync for historical market data:
+The current codebase is centered on a simple demo workflow:
+
+1. Upload a Markdown Skill.
+2. Validate required sections and extract a Skill Envelope.
+3. Run the Skill in `backtest` or `live_signal` mode.
+4. Persist traces, simulated portfolio state, and live signal records.
+5. Inspect results in the React dashboard.
+
+What works now:
+
+- Skill upload, validation, envelope extraction, and list/detail APIs
+- Backtest creation, replay execution, summary retrieval, trace retrieval, and backtest portfolio inspection
+- Live task creation, periodic scheduling, manual triggering, recent signal retrieval, and live-task portfolio inspection
+- Blocking startup sync for operator-managed historical market data:
   1. import local OKX CSV seed files into SQLite
-  2. try small incremental API catch-up for active OKX `USDT-SWAP` symbols
+  2. optionally try small incremental API catch-up for active OKX `USDT-SWAP` symbols
 - Historical candle query APIs with dynamic aggregation from stored `1m` bars into `15m`, `4h`, or other intervals
-- React demo dashboard with service pulse, market coverage, skill review controls, backtest launch, and recent signals
-- Agent Runner service boundary with a real OpenAI-compatible LLM tool runtime plus a heuristic fallback for rate-limit or provider failures
-- Internal Tool Gateway HTTP path so the runner fetches market/state data on demand instead of relying on preloaded candle blobs
+- React demo dashboard with service pulse, market coverage, skill upload, backtest launch, live task activation, and recent signals
+- Agent Runner service boundary with an OpenAI Responses API tool loop plus structured decision sanitization
+- Internal Tool Gateway HTTP path so the runner fetches market, state, and portfolio data on demand instead of relying on preloaded candle blobs
+
+What is intentionally not part of the current implementation:
+
+- The old `preview -> review -> approved_full_window` workflow
+- Public review-state APIs or dashboard review controls
+- An active `strategy` / `strategy_version` / `review_request` public resource model
+- Export bundles for backtest artifacts
+- Real notification delivery channels such as Telegram or webhook dispatch
+- IR-first strategy compilation as the runtime execution path
+
+## Current public API surface
+
+The current public API is defined by the FastAPI routes under `apps/api/app/api/routes/`.
+
+Public endpoints:
+
+- `GET /api/v1/health`
+- `GET /api/v1/market-data/overview`
+- `GET /api/v1/market-data/symbols`
+- `GET /api/v1/market-data/candles?market_symbol=BTC-USDT-SWAP&timeframe=15m&limit=100`
+- `GET /api/v1/skills`
+- `POST /api/v1/skills`
+- `GET /api/v1/skills/{skill_id}`
+- `GET /api/v1/backtests`
+- `POST /api/v1/backtests`
+- `GET /api/v1/backtests/{run_id}`
+- `GET /api/v1/backtests/{run_id}/summary`
+- `GET /api/v1/backtests/{run_id}/traces`
+- `GET /api/v1/backtests/{run_id}/portfolio`
+- `GET /api/v1/live-tasks`
+- `POST /api/v1/live-tasks`
+- `POST /api/v1/live-tasks/{task_id}/trigger`
+- `GET /api/v1/live-tasks/{task_id}/portfolio`
+- `GET /api/v1/live-signals`
+
+Internal-only endpoints exist under `/api/v1/internal/tool-gateway/*` for the Agent Runner and should not be treated as public API.
+
+## Current data model
+
+The demo persists its runtime state in SQLite. The core tables represented in `apps/api/app/models.py` are:
+
+- `skills`
+- `backtest_runs`
+- `run_traces`
+- `live_tasks`
+- `live_signals`
+- `strategy_states`
+- `execution_strategy_states`
+- `portfolio_books`
+- `portfolio_positions`
+- `portfolio_fills`
+- `trace_execution_details`
+- `market_candles`
+- `csv_ingestion_jobs`
+- `market_sync_cursors`
+
+Notable implementation details:
+
+- The active runtime state path is execution-scoped: `PortfolioEngine` reads and writes `execution_strategy_states` for each `backtest_run` or `live_task`
+- `skills.review_status` and the `strategy_states` table still exist in the schema as legacy artifacts, but the current public workflow does not use them as review gates
+- Backtest summaries are stored inline on `backtest_runs.summary_json`
+- Live outputs are stored as signal records on `live_signals.signal_json`, with `delivery_status` currently used only to distinguish stored vs failed runs
+- There is no separate review-request, export-bundle, or dataset-version table in the current demo
 
 ## Historical data behavior
 
@@ -51,7 +125,7 @@ The current demo is opinionated around the requirements already clarified in pro
 - Protect startup from OKX API rate limits with `TRADE_SKILLS_OKX_INCREMENTAL_MAX_GAP_DAYS`
   - if the gap from local coverage to the target cutoff is too large, the symbol is marked `skipped`
   - large backfills should be handled by pre-downloaded CSV seed files, not by startup API pagination
-- For UI-first local debugging, you can set `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED=false` so startup still imports local CSVs but skips all OKX API catch-up.
+- For UI-first local debugging, you can set `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED=false` so startup still imports local CSVs but skips all OKX API catch-up
 
 ### Seed-first workflow
 
@@ -60,24 +134,53 @@ Recommended local workflow:
 1. Download OKX historical candle CSV files into the sibling `../data` directory.
 2. Start the API.
 3. On startup, the API imports unseen CSVs into SQLite.
-4. After CSV import, the API attempts incremental catch-up only for small missing windows.
+4. After CSV import, the API optionally attempts incremental catch-up only for small missing windows.
 5. The dashboard and `/api/v1/market-data/overview` show what was imported and what was skipped.
 
 This is designed for a debug-heavy development machine where services restart often.
 
-## Review-state workflow
+## Current execution semantics
 
-A Skill has two practical backtest scopes in the demo:
+### Skill validation and envelope extraction
 
-- `preview_ready`: can run only inside the default recent preview window
-- `approved_full_window`: can run larger historical windows after manual approval
+A valid Skill currently needs:
 
-The web dashboard now exposes both review controls so you can quickly test:
+- a title
+- an identifiable execution cadence such as `Every 15 minutes` or `每 15 分钟`
+- an identifiable AI reasoning section
+- explicit risk-control guidance
 
-- upload Skill -> preview-ready immediately
-- approve Skill -> unlock older seeded history for replay
+If extraction succeeds, the API stores the raw Markdown and the extracted Skill Envelope. If extraction fails, upload is rejected with validation errors.
 
-If your local CSV coverage is old data only, a preview-ready Skill may correctly fail for out-of-window backtests until you approve it.
+### Backtest window rules
+
+Current backtest creation rules are code-driven and intentionally simple:
+
+- the requested window must satisfy `end_time > start_time`
+- the requested window must fit entirely inside local historical data coverage
+- the window must span at least one full cadence interval
+- there is no preview-only or approval-gated time window in the current implementation
+
+### Portfolio simulation
+
+The current backtest and live runtime share the same `PortfolioEngine` model:
+
+- decisions can `open_position`, `close_position`, `reduce_position`, `skip`, `watch`, or `hold`
+- fills and positions are persisted per execution scope
+- unrealized PnL is computed by mark-to-market against historical close prices available at the current `as_of` time
+- summary metrics are derived from the simulated portfolio state and closed-trade statistics
+
+## Agent runtime notes
+
+- The Agent Runner reads raw Skill Markdown, lets the model call runtime tools, and returns a structured decision payload.
+- Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
+- The runner calls the API's internal Tool Gateway over HTTP for market, state, portfolio, and signal-staging operations.
+- The current toolset includes `scan_market`, `get_market_metadata`, `get_candles`, `compute_indicators`, `get_funding_rate`, `get_open_interest`, `get_strategy_state`, `save_strategy_state`, `get_portfolio_state`, `simulate_order`, `emit_signal`, and `python_exec`.
+- The runner currently uses the OpenAI Responses API tool loop, not the older chat-completions flow.
+- If the model returns a non-JSON final answer after tool use, the runtime fails closed to a `skip` decision instead of applying an unstructured action.
+- If your API runs on a non-default host or port, set `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL` so the runner callback URL points at the API process correctly.
+- Because your dev machine has a public IP, set `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET` to protect `/api/v1/internal/tool-gateway/*`.
+- The web dashboard reads both API and runner health directly from the browser, so if you access the dashboard from another device you should set both `TRADE_SKILLS_ALLOWED_ORIGINS` and `AGENT_RUNNER_ALLOWED_ORIGINS` to include that web origin.
 
 ## Quick start
 
@@ -127,32 +230,6 @@ make dev-status
 make dev-down
 ```
 
-## Important API endpoints
-
-- `GET /api/v1/health`
-- `GET /api/v1/market-data/overview`
-- `GET /api/v1/market-data/symbols`
-- `GET /api/v1/market-data/candles?market_symbol=BTC-USDT-SWAP&timeframe=15m&limit=100`
-- `POST /api/v1/skills`
-- `POST /api/v1/skills/{skill_id}/review-state`
-- `POST /api/v1/backtests`
-- `GET /api/v1/backtests/{run_id}/traces`
-- `POST /api/v1/live-tasks`
-- `POST /api/v1/live-tasks/{task_id}/trigger`
-
-## Agent runtime notes
-
-- The Agent Runner now reads raw Skill Markdown, lets the LLM call local tools, and returns a structured decision payload.
-- Backtest and live mode share the same tool-driven runtime; only the trigger clock and downstream consumer differ.
-- The runner now calls the API's internal Tool Gateway over HTTP for `scan_market`, `get_candles`, `get_strategy_state`, `save_strategy_state`, `get_funding_rate`, and `get_open_interest`.
-- This removes the earlier preloaded `tool_context` dependency and makes the runner architecture closer to a real remote Agent runtime.
-- The Tool Gateway is now capability-layered into `market/*`, `state/*`, and `signal/*` internal handlers, while `/execute` remains as a compatibility dispatcher.
-- The current OpenAI-compatible provider used in local testing requires `stream=true` for `/v1/chat/completions`, so the runner uses a streamed tool loop internally.
-- If the LLM provider returns `429` or transient `5xx` errors, the runner retries with backoff and then falls back to the local heuristic engine so the platform still completes the run.
-- If your API runs on a non-default host or port, set `TRADE_SKILLS_TOOL_GATEWAY_BASE_URL` so the runner callback URL points at the API process correctly.
-- Because your dev machine has a public IP, set `TRADE_SKILLS_TOOL_GATEWAY_SHARED_SECRET` to protect `/api/v1/internal/tool-gateway/execute`.
-- The web dashboard reads both API and runner health directly from the browser, so if you access the dashboard from another device you should set both `TRADE_SKILLS_ALLOWED_ORIGINS` and `AGENT_RUNNER_ALLOWED_ORIGINS` to include that web origin.
-
 ## Example environment variables
 
 See `infra/env/api.env.example`, especially:
@@ -182,9 +259,15 @@ make smoke-python
 make smoke-web-json
 ```
 
+## Document status
+
+- `README.md` and `docs/historical-backtest-flow.md` describe the current implementation.
+- Several files under `openspec/changes/build-agent-trading-skills-platform/` are preserved as historical design material. If those documents disagree with the running code, treat the code as authoritative.
+
 ## Notes for the next iteration
 
 1. Replace the current demo market enrichments with real OKX funding-rate and open-interest adapters.
 2. Add a proper migration layer instead of relying on `create_all` for schema evolution.
 3. Expose sync status and replay traces in richer operator views.
 4. Add stronger provider-side rate controls or queueing for larger backtests.
+5. Decide whether live signals should remain storage-only or grow a real notification delivery path.

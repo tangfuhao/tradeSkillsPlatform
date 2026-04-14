@@ -1,5 +1,10 @@
 # 回测平台 API 设计（V0.1 建议稿）
 
+> 历史说明（请以代码为准）
+> - 本文保留的是早期 API 设计稿，不代表当前运行实现。
+> - 当前公开 API 以 `apps/api/app/api/routes/` 为准，只包含 `/api/v1/health`、`/api/v1/market-data/*`、`/api/v1/skills*`、`/api/v1/backtests*`、`/api/v1/live-tasks*`、`/api/v1/live-signals`。
+> - 当前代码已经明确移除 `preview -> review -> approved_full_window` 工作流；文中的 `strategy_version`、`review_request`、`preview-window`、审核后台和 `export_bundle` 接口都不是当前实现。
+
 ## 1. 目标
 
 这份文档把产品需求继续下沉到接口层，定义首版 Agent 交易 Skills 平台的 API 边界。

@@ -1,5 +1,10 @@
 # Agent Runtime 架构设计（V0.1 建议稿）
 
+> 历史说明（请以代码为准）
+> - 本文保留的是早期 Agent Runtime 技术选型建议稿，当前代码实现已经收敛到另一条更具体的路线。
+> - 当前 Runner 位于 `services/agent-runner/runner/`，通过 FastAPI 暴露执行接口，并使用 OpenAI Responses API 工具循环、HTTP Tool Gateway 回调和结构化决策清洗。
+> - 文中提到的 PydanticAI、独立容器级编排、通知通道等内容不应视为当前实现状态。
+
 ## 1. 定位
 
 这份文档定义的是“Skill 驱动的交易 Agent Runtime”。

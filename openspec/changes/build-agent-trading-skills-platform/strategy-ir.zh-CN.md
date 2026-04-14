@@ -1,5 +1,10 @@
 # Strategy IR 设计文档（V0.1 建议稿）
 
+> 历史说明（请以代码为准）
+> - 本文描述的是 IR-first 执行路线，但这不是当前代码的运行主路径。
+> - 当前实现以原始 Markdown Skill + Skill Envelope + Tool Gateway + OpenAI Responses API 工具循环为核心，不会先把策略编译成确定性的 Strategy IR 再执行。
+> - 如果本文和 `services/agent-runner/runner/`、`apps/api/app/services/skills.py`、`apps/api/app/services/envelope_extractor.py` 不一致，请以代码为准。
+
 ## 1. 目标
 
 Strategy IR（Intermediate Representation，策略中间表示）是平台内部真正用于执行回测的标准化策略结构。
