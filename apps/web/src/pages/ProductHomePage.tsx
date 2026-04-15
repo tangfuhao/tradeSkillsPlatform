@@ -255,23 +255,23 @@ export default function ProductHomePage() {
                   const owner = data.skills.find((skill) => skill.id === run.skill_id) ?? null;
                   const returnPct = getRunReturnPct(run);
                   return (
-                    <Link className="record-row" key={run.id} to={`/replays/${run.id}`}>
-                      <div className="record-main compact-record-main">
-                        <div>
-                          <p className="record-title">{owner?.title ?? run.skill_id}</p>
-                          <p className="record-subtitle">{formatWindow(run.start_time_ms, run.end_time_ms)}</p>
-                        </div>
+                    <Link className="record-row compact-backtest-row" key={run.id} to={`/replays/${run.id}`}>
+                      <div>
+                        <p className="record-title">{owner?.title ?? run.skill_id}</p>
+                        <p className="record-subtitle">{formatWindow(run.start_time_ms, run.end_time_ms)}</p>
+                      </div>
+                      <div className="compact-status-col">
                         <div className="meta-row">
                           <span className={`status-pill is-${toneForStatus(run.status)}`}>{describeStatus(run.status)}</span>
                           <span className="info-pill">{run.pending_action ? `待执行 ${run.pending_action}` : getProgressLabel(run)}</span>
-                          <span className="info-pill">{returnPct == null ? '等待结果' : formatSignedPercent(returnPct)}</span>
                         </div>
-                      </div>
-                      <div className="progress-shell">
                         <div className="progress-bar">
                           <span className="progress-fill" style={{ width: progressWidth(run) }} />
                         </div>
-                        <span className="record-subtitle">最后活动 {formatTime(run.last_activity_at_ms ?? run.updated_at_ms)}</span>
+                        <span className="record-subtitle">{formatTime(run.last_activity_at_ms ?? run.updated_at_ms)}</span>
+                      </div>
+                      <div>
+                        <span className="info-pill">{returnPct == null ? '等待结果' : formatSignedPercent(returnPct)}</span>
                       </div>
                     </Link>
                   );

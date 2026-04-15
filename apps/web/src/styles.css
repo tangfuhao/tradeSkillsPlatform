@@ -267,6 +267,11 @@ select {
   gap: 18px;
 }
 
+.dashboard-main,
+.dashboard-side {
+  gap: 16px;
+}
+
 /* ── Surface (Card) ──────────────────────────────────── */
 
 .surface,
@@ -752,6 +757,21 @@ select {
 
 .compact-record-main {
   grid-template-columns: 1.2fr 1fr;
+}
+
+.compact-backtest-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 0.8fr;
+  gap: 12px;
+  padding: 10px 0;
+  align-items: center;
+  flex-direction: unset;
+}
+
+.compact-status-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .strategy-row-main {
