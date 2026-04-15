@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import LifecycleActions from '../components/LifecycleActions';
@@ -20,13 +20,19 @@ import {
   triggerLiveTask,
 } from '../api';
 import {
+  DEFAULT_BACKTEST_INITIAL_CAPITAL,
+  getDefaultBacktestWindow,
+  getDefaultBacktestWindowMs,
+  getHistoricalCoverageWindow,
+  resolveBacktestLaunchRequest,
+} from '../lib/backtest';
+import {
   describeStatus,
   formatCount,
   formatSignedCurrency,
   formatSignedPercent,
   formatTime,
   formatWindow,
-  getDefaultBacktestWindowMs,
   getErrorMessage,
   toneForStatus,
 } from '../lib/formatting';
@@ -52,6 +58,10 @@ export default function StrategiesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [launcherSkillId, setLauncherSkillId] = useState<string | null>(null);
+  const [launcherStart, setLauncherStart] = useState('');
+  const [launcherEnd, setLauncherEnd] = useState('');
+  const [launcherInitialCapital, setLauncherInitialCapital] = useState(DEFAULT_BACKTEST_INITIAL_CAPITAL);
 
   const load = useCallback(async () => {
     try {
@@ -98,6 +108,12 @@ export default function StrategiesPage() {
   );
 
   const defaultBacktestWindow = getDefaultBacktestWindowMs(data.overview);
+  const coverageWindow = getHistoricalCoverageWindow(data.overview);
+  const launcherSkill = useMemo(
+    () => data.skills.find((skill) => skill.id === launcherSkillId) ?? null,
+    [data.skills, launcherSkillId],
+  );
+  const launcherPending = launcherSkill ? pendingKey === `${launcherSkill.id}:create_backtest` : false;
 
   const stats = useMemo(
     () => [
@@ -117,12 +133,34 @@ export default function StrategiesPage() {
         detail: '回测与实时都锚定到策略实体',
       },
       {
-        label: '近 24h 窗口',
-        value: defaultBacktestWindow ? formatTime(defaultBacktestWindow.endTimeMs) : '--',
-        detail: defaultBacktestWindow ? '一键回测默认使用最近 24 小时' : '等待市场数据覆盖窗口',
+        label: '回测配置',
+        value: defaultBacktestWindow ? '可自定义' : '--',
+        detail: defaultBacktestWindow ? '默认预填最近 24 小时，并受历史覆盖范围约束' : '等待市场数据覆盖窗口',
       },
     ],
     [backtests, defaultBacktestWindow, insights],
+  );
+
+  const resetLauncherToDefaultWindow = useCallback(() => {
+    const nextWindow = getDefaultBacktestWindow(data.overview);
+    if (!nextWindow) {
+      setError('当前没有足够的历史行情覆盖范围，无法配置回测。');
+      return false;
+    }
+    setLauncherStart(nextWindow.start);
+    setLauncherEnd(nextWindow.end);
+    setLauncherInitialCapital(DEFAULT_BACKTEST_INITIAL_CAPITAL);
+    return true;
+  }, [data.overview]);
+
+  const openBacktestLauncher = useCallback(
+    (skill: Skill) => {
+      const resetApplied = resetLauncherToDefaultWindow();
+      if (!resetApplied) return;
+      setLauncherSkillId(skill.id);
+      setError(null);
+    },
+    [resetLauncherToDefaultWindow],
   );
 
   async function handleStrategyAction(skill: Skill, action: ExecutionAction) {
@@ -134,33 +172,58 @@ export default function StrategiesPage() {
       if (!confirmed) return;
     }
     if (action === 'create_backtest') {
-      if (!defaultBacktestWindow) {
-        setError('当前没有足够的历史行情覆盖范围，无法发起默认回测。');
-        return;
-      }
-      const confirmed = window.confirm(
-        `为策略 ${skill.title} 发起最近 24 小时回测？\n\n窗口：${formatWindow(
-          defaultBacktestWindow.startTimeMs,
-          defaultBacktestWindow.endTimeMs,
-        )}`,
-      );
-      if (!confirmed) return;
+      openBacktestLauncher(skill);
+      return;
     }
 
     setPendingKey(key);
     try {
-      if (action === 'create_backtest' && defaultBacktestWindow) {
-        await createBacktest({
-          skill_id: skill.id,
-          start_time_ms: defaultBacktestWindow.startTimeMs,
-          end_time_ms: defaultBacktestWindow.endTimeMs,
-          initial_capital: 10_000,
-        });
-      } else if (action === 'create_live_task') {
+      if (action === 'create_live_task') {
         await createLiveTask({ skill_id: skill.id });
       } else if (action === 'delete') {
         await deleteSkill(skill.id);
       }
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingKey(null);
+    }
+  }
+
+  async function handleLaunchBacktest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!launcherSkill) {
+      setError('请先从策略动作中选择要发起回测的策略。');
+      return;
+    }
+
+    const nextRequest = resolveBacktestLaunchRequest({
+      overview: data.overview,
+      startInput: launcherStart,
+      endInput: launcherEnd,
+      initialCapital: launcherInitialCapital,
+      cadence: launcherSkill.envelope?.trigger?.value,
+    });
+    if (nextRequest.error) {
+      setError(nextRequest.error);
+      return;
+    }
+    const payload = nextRequest.payload;
+    if (!payload) {
+      setError('回测请求准备失败，请重新选择时间窗口。');
+      return;
+    }
+
+    const key = `${launcherSkill.id}:create_backtest`;
+    setPendingKey(key);
+    try {
+      await createBacktest({
+        skill_id: launcherSkill.id,
+        ...payload,
+      });
+      setLauncherSkillId(null);
+      setError(null);
       await load();
     } catch (nextError) {
       setError(getErrorMessage(nextError));
@@ -216,6 +279,13 @@ export default function StrategiesPage() {
     }
   }
 
+  useEffect(() => {
+    if (!launcherSkillId) return;
+    if (!data.skills.some((skill) => skill.id === launcherSkillId)) {
+      setLauncherSkillId(null);
+    }
+  }, [data.skills, launcherSkillId]);
+
   return (
     <div className="page-stack">
       <section className="hero-panel surface">
@@ -223,7 +293,7 @@ export default function StrategiesPage() {
           <p className="section-eyebrow">Strategy Operations</p>
           <h1>把策略页变成真正的管理面，而不是纯展示目录。</h1>
           <p className="hero-copy">
-            这里围绕策略本体进行管理：创建不可编辑策略、发起回测、启动或停止实时运行、以及执行级联删除。
+            这里围绕策略本体进行管理：创建不可编辑策略、按历史覆盖配置回测窗口、启动或停止实时运行、以及执行级联删除。
           </p>
         </div>
         <div className="hero-meta">
@@ -436,7 +506,7 @@ export default function StrategiesPage() {
                             ) : (
                               <div className="empty-state compact-empty">
                                 <strong>还没有回测记录</strong>
-                                <p>可以直接从策略级动作发起最近 24 小时回测。</p>
+                                <p>可以直接从策略级动作打开回测配置面板，自定义窗口后立即启动。</p>
                               </div>
                             )}
                           </section>
@@ -458,6 +528,94 @@ export default function StrategiesPage() {
         </section>
 
         <div className="management-side">
+          <section className="surface strategy-launcher-surface">
+            <div className="section-head">
+              <div>
+                <p className="section-eyebrow">Backtest Launcher</p>
+                <h2>回测启动器</h2>
+              </div>
+              {launcherSkill ? (
+                <button className="text-link launcher-dismiss" onClick={() => setLauncherSkillId(null)} type="button">
+                  收起
+                </button>
+              ) : null}
+            </div>
+
+            {launcherSkill ? (
+              <form className="launcher-form" onSubmit={handleLaunchBacktest}>
+                <div className="launcher-summary">
+                  <div>
+                    <span className="section-note">当前策略</span>
+                    <strong>{launcherSkill.title}</strong>
+                    <p className="record-subtitle">
+                      节奏 {getSkillCadence(launcherSkill)} / 状态 {describeStatus(launcherSkill.validation_status)}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="section-note">历史覆盖</span>
+                    <strong>{formatWindow(data.overview?.coverage_start_ms, data.overview?.coverage_end_ms)}</strong>
+                    <p className="record-subtitle">
+                      默认会预填最近 24 小时；你可以在覆盖范围内重新指定开始和结束时间。
+                    </p>
+                  </div>
+                </div>
+
+                <div className="launcher-grid">
+                  <label className="launcher-field">
+                    <span>回测开始时间</span>
+                    <input
+                      max={coverageWindow?.end}
+                      min={coverageWindow?.start}
+                      onChange={(event) => setLauncherStart(event.target.value)}
+                      type="datetime-local"
+                      value={launcherStart}
+                    />
+                  </label>
+                  <label className="launcher-field">
+                    <span>回测结束时间</span>
+                    <input
+                      max={coverageWindow?.end}
+                      min={coverageWindow?.start}
+                      onChange={(event) => setLauncherEnd(event.target.value)}
+                      type="datetime-local"
+                      value={launcherEnd}
+                    />
+                  </label>
+                </div>
+
+                <label className="launcher-field">
+                  <span>初始资金</span>
+                  <input
+                    min={1000}
+                    onChange={(event) => setLauncherInitialCapital(Number(event.target.value))}
+                    step={500}
+                    type="number"
+                    value={launcherInitialCapital}
+                  />
+                </label>
+
+                <div className="launcher-actions">
+                  <button className="action-button" onClick={() => resetLauncherToDefaultWindow()} type="button">
+                    恢复最近 24h 默认
+                  </button>
+                  <button className="action-button is-primary" disabled={launcherPending || loading} type="submit">
+                    {launcherPending ? '启动中...' : '启动回测'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="empty-state compact-empty launcher-empty">
+                <strong>等待选择策略</strong>
+                <p>从任意策略卡片点击“配置回测”，这里会展示该策略的可配置回测窗口。</p>
+                <p className="record-subtitle">
+                  {defaultBacktestWindow
+                    ? `默认窗口：${formatWindow(defaultBacktestWindow.startTimeMs, defaultBacktestWindow.endTimeMs)}`
+                    : '当前没有足够的历史覆盖范围，暂时无法发起回测。'}
+                </p>
+              </div>
+            )}
+          </section>
+
           <StrategyComposer
             description="创建完成后立即进入策略工作台；策略会成为不可编辑的执行锚点。"
             onCreated={() => {

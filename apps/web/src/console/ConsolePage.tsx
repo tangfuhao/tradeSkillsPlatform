@@ -2,6 +2,11 @@ import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import {
+  DEFAULT_BACKTEST_INITIAL_CAPITAL,
+  getDefaultBacktestWindow,
+  resolveBacktestLaunchRequest,
+} from '../lib/backtest';
+import {
   createBacktest,
   createLiveTask,
   createSkill,
@@ -95,12 +100,6 @@ const scopeLabels: Record<string, string> = {
   historical: '历史回放',
 };
 
-function toDateTimeLocal(value: Date): string {
-  const offset = value.getTimezoneOffset();
-  const local = new Date(value.getTime() - offset * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
 function translateToken(value?: string | null, dictionary: Record<string, string> = {}): string {
   if (!value) return '--';
   return dictionary[value] ?? value.replace(/_/g, ' ');
@@ -181,21 +180,6 @@ function countSignalsToday(signals: LiveSignal[]): number {
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-function getDefaultBacktestWindow(overview: MarketOverview | null): { start: string; end: string } | null {
-  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
-  const coverageStart = new Date(overview.coverage_start_ms);
-  const coverageEnd = new Date(overview.coverage_end_ms);
-  if (Number.isNaN(coverageStart.getTime()) || Number.isNaN(coverageEnd.getTime()) || coverageEnd <= coverageStart) {
-    return null;
-  }
-  const dayMs = 24 * 60 * 60 * 1000;
-  const startMs = Math.max(coverageStart.getTime(), coverageEnd.getTime() - dayMs);
-  return {
-    start: toDateTimeLocal(new Date(startMs)),
-    end: toDateTimeLocal(coverageEnd),
-  };
 }
 
 function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutral' {
@@ -300,7 +284,7 @@ export default function ConsolePage() {
   const [backtestStart, setBacktestStart] = useState('');
   const [backtestEnd, setBacktestEnd] = useState('');
   const [backtestWindowInitialized, setBacktestWindowInitialized] = useState(false);
-  const [initialCapital, setInitialCapital] = useState(10000);
+  const [initialCapital, setInitialCapital] = useState(DEFAULT_BACKTEST_INITIAL_CAPITAL);
 
   const selectedSkill = useMemo(
     () => skills.find((skill) => skill.id === selectedSkillId) ?? skills[0],
@@ -489,18 +473,20 @@ export default function ConsolePage() {
       return;
     }
 
-    const startDate = new Date(backtestStart);
-    const endDate = new Date(backtestEnd);
-    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-      setMessage('回放时间无效，请重新选择开始与结束时间。');
+    const nextRequest = resolveBacktestLaunchRequest({
+      overview: marketOverview,
+      startInput: backtestStart,
+      endInput: backtestEnd,
+      initialCapital,
+      cadence: selectedSkill.envelope?.trigger?.value,
+    });
+    if (nextRequest.error) {
+      setMessage(nextRequest.error);
       return;
     }
-    if (startDate >= endDate) {
-      setMessage('回放结束时间必须晚于开始时间。');
-      return;
-    }
-    if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
-      setMessage('初始资金必须是大于 0 的数字。');
+    const payload = nextRequest.payload;
+    if (!payload) {
+      setMessage('回放请求准备失败，请重新选择时间窗口。');
       return;
     }
 
@@ -509,9 +495,7 @@ export default function ConsolePage() {
     try {
       const created = await createBacktest({
         skill_id: selectedSkill.id,
-        start_time_ms: startDate.getTime(),
-        end_time_ms: endDate.getTime(),
-        initial_capital: initialCapital,
+        ...payload,
       });
       setSelectedBacktestId(created.id);
       setBacktestTraces([]);

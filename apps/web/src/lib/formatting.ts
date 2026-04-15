@@ -1,4 +1,4 @@
-import type { LiveSignal, MarketOverview, Skill, ToolCall } from '../types';
+import type { LiveSignal, Skill, ToolCall } from '../types';
 
 export const LOCALE = 'zh-CN';
 
@@ -166,33 +166,6 @@ export function countSignalsToday(signals: LiveSignal[]): number {
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-export function getDefaultBacktestWindow(overview: MarketOverview | null): { start: string; end: string } | null {
-  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
-  const coverageStart = new Date(overview.coverage_start_ms);
-  const coverageEnd = new Date(overview.coverage_end_ms);
-  if (Number.isNaN(coverageStart.getTime()) || Number.isNaN(coverageEnd.getTime()) || coverageEnd <= coverageStart) {
-    return null;
-  }
-  const dayMs = 24 * 60 * 60 * 1000;
-  const startMs = Math.max(coverageStart.getTime(), coverageEnd.getTime() - dayMs);
-  return {
-    start: toDateTimeLocal(new Date(startMs)),
-    end: toDateTimeLocal(coverageEnd),
-  };
-}
-
-export function getDefaultBacktestWindowMs(
-  overview: MarketOverview | null,
-): { startTimeMs: number; endTimeMs: number } | null {
-  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
-  const startTimeMs = Math.max(overview.coverage_start_ms, overview.coverage_end_ms - 24 * 60 * 60 * 1000);
-  if (startTimeMs >= overview.coverage_end_ms) return null;
-  return {
-    startTimeMs,
-    endTimeMs: overview.coverage_end_ms,
-  };
 }
 
 export function formatDurationFromMs(startMs?: number | null, endMs: number = Date.now()): string {
