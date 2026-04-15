@@ -1,21 +1,4 @@
-# strategy-operations-surface Specification
-
-## Purpose
-TBD - created by archiving change upgrade-product-workbench-and-controls. Update Purpose after archive.
-## Requirements
-### Requirement: Strategy operations surface SHALL present linked execution ownership
-The product-facing strategy management surface SHALL list strategies with immutable identity, linked live-runtime state, recent backtest context, and primary actions.
-
-#### Scenario: User opens the strategy management surface
-- **WHEN** a user navigates to the strategy management route
-- **THEN** the system renders strategies with enough ownership context to understand which executions belong to each strategy and what actions are currently available
-
-### Requirement: Strategy operations surface SHALL provide direct strategy-skill entry
-The product-facing strategy management surface SHALL allow a user to paste strategy skill text and create a new immutable strategy without using the operator console.
-
-#### Scenario: User creates a strategy from the management surface
-- **WHEN** a user submits valid strategy skill text from the strategy management surface
-- **THEN** the system creates a new strategy artifact and refreshes the management surface to include it
+## MODIFIED Requirements
 
 ### Requirement: Strategy operations surface SHALL expose execution and destructive actions safely
 The strategy management surface SHALL expose create, delete, backtest, and live-runtime actions for each strategy, SHALL clarify cascade or lifecycle consequences before destructive actions execute, and SHALL collect configurable backtest inputs before a backtest run is created.

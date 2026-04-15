@@ -270,7 +270,7 @@ export default function ProductHomePage() {
             ) : (
               <div className="empty-state compact-empty">
                 <strong>还没有回测记录</strong>
-                <p>策略页支持一键发起最近 24 小时回测，完成后会立即回到这里。</p>
+                <p>策略页支持按历史覆盖范围配置回测窗口，完成后会立即回到这里。</p>
               </div>
             )}
           </section>

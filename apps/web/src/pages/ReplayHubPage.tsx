@@ -207,7 +207,7 @@ export default function ReplayHubPage() {
         ) : (
           <div className="empty-state">
             <strong>{loading ? '回测数据读取中...' : '还没有回测记录'}</strong>
-            <p>去策略页选择策略并发起近 24 小时回测，这里会自动成为回测操作面板。</p>
+            <p>去策略页选择策略并配置回测窗口，这里会自动成为回测操作面板。</p>
           </div>
         )}
       </section>

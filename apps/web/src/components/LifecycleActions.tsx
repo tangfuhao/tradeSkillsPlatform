@@ -13,7 +13,7 @@ const ACTION_LABELS: Record<string, string> = {
   stop: '停止',
   delete: '删除',
   trigger: '立即触发',
-  create_backtest: '近 24h 回测',
+  create_backtest: '配置回测',
   create_live_task: '启动实时',
 };
 
