@@ -22,15 +22,15 @@ export default function App() {
           <Route path="/signals" element={<SignalsPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/strategies/:skillId" element={<StrategyProfilePage />} />
+          <Route
+            path="/console"
+            element={
+              <Suspense fallback={null}>
+                <ConsolePage />
+              </Suspense>
+            }
+          />
         </Route>
-        <Route
-          path="/console"
-          element={
-            <Suspense fallback={null}>
-              <ConsolePage />
-            </Suspense>
-          }
-        />
         <Route path="*" element={<Navigate replace to="/" />} />
       </Routes>
     </BrowserRouter>

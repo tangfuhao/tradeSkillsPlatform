@@ -1,6 +1,4 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-
 import {
   createBacktest,
   createLiveTask,
@@ -220,10 +218,11 @@ type PanelHeaderProps = {
 
 function PanelHeader({ title, subtitle, action }: PanelHeaderProps) {
   return (
-    <div className="panel-header">
-      <div className="panel-title">
+    <div className="section-head console-section-head">
+      <div>
+        <p className="section-eyebrow">Operator Console</p>
         <h2>{title}</h2>
-        {subtitle ? <span>{subtitle}</span> : null}
+        {subtitle ? <p className="section-note">{subtitle}</p> : null}
       </div>
       {action ?? null}
     </div>
@@ -239,10 +238,10 @@ type MetricCardProps = {
 
 function MetricCard({ label, value, detail, tone = 'neutral' }: MetricCardProps) {
   return (
-    <div className={`metric-card tone-${tone}`}>
+    <div className={`metric-tile console-metric-tile tone-${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
+      {detail ? <p>{detail}</p> : null}
     </div>
   );
 }
@@ -569,33 +568,26 @@ export default function ConsolePage() {
   }
 
   return (
-    <div className="console-root">
-      <div className="console-toolbar">
-        <Link className="console-home-link" to="/">
-          返回产品首页
-        </Link>
-      </div>
-      <div className="shell">
-      <header className="hero">
+    <div className="page-stack console-page">
+      <section className="hero-panel surface console-hero">
         <div className="hero-copy-block">
-          <p className="eyebrow">TradeSkills 中文控制台</p>
+          <p className="section-eyebrow">Operator Console</p>
           <h1>把策略编排、历史回放和实时信号统一收进一个中文版工作台。</h1>
           <p className="hero-copy">
             用自然语言撰写交易 Skill，系统会抽取运行约束、连接本地 OKX 历史数据，并把回放实验和实时任务放在同一条工作流里。
           </p>
           <div className="hero-tags">
-            <span className="hero-tag">中文界面</span>
-            <span className="hero-tag">回放优先</span>
-            <span className="hero-tag">统一风控</span>
-            <span className="hero-tag">实时信号</span>
+            <span className="info-pill">中文界面</span>
+            <span className="info-pill">回放优先</span>
+            <span className="info-pill">统一风控</span>
+            <span className="info-pill">实时信号</span>
           </div>
         </div>
 
         <div className="hero-side">
-          <div className={`status-ribbon ${loading ? 'is-loading' : ''}`}>
-            <span className="status-dot" />
+          <div className={`feedback-banner console-status-banner ${loading ? 'is-loading' : ''}`}>
             <div>
-              <small>{loading ? '系统忙碌中' : '系统提示'}</small>
+              <p className="section-eyebrow">{loading ? '系统忙碌中' : '系统提示'}</p>
               <strong>{loading ? '正在处理请求' : '控制台已就绪'}</strong>
               <p>{message}</p>
             </div>
@@ -607,15 +599,15 @@ export default function ConsolePage() {
             ))}
           </div>
         </div>
-      </header>
+      </section>
 
-      <section className="grid overview-grid">
-        <article className="panel">
+      <section className="dual-grid console-overview-grid">
+        <article className="surface">
           <PanelHeader
             title="运行脉冲"
             subtitle="检查核心服务是否在线，以及当前连接的地址。"
             action={
-              <button type="button" onClick={() => refreshDashboard().catch((error) => setMessage(`刷新失败：${getErrorMessage(error)}`))}>
+              <button className="action-button" type="button" onClick={() => refreshDashboard().catch((error) => setMessage(`刷新失败：${getErrorMessage(error)}`))}>
                 刷新数据
               </button>
             }
@@ -626,7 +618,7 @@ export default function ConsolePage() {
                 <div className={`pulse-card tone-${toneForStatus(item.status)}`} key={item.name}>
                   <div className="pulse-card-head">
                     <p>{item.name}</p>
-                    <span className={`status-chip chip-${toneForStatus(item.status)}`}>{describeStatus(item.status)}</span>
+                    <span className={`status-pill is-${toneForStatus(item.status)}`}>{describeStatus(item.status)}</span>
                   </div>
                   <strong>{item.details ?? '--'}</strong>
                   <span>状态回传正常后，这里会显示你当前使用的服务入口。</span>
@@ -640,7 +632,7 @@ export default function ConsolePage() {
           </div>
         </article>
 
-        <article className="panel">
+        <article className="surface">
           <PanelHeader title="市场数据面板" subtitle="本地历史覆盖、基础粒度与最近同步结果一目了然。" />
           <div className="insight-grid">
             <MetricCard label="覆盖币种" value={formatCount(marketOverview?.total_symbols)} detail="已纳入本地历史仓库的交易标的数量" tone="accent" />
@@ -665,8 +657,8 @@ export default function ConsolePage() {
         </article>
       </section>
 
-      <section className="grid workspace-grid">
-        <article className="panel tall-panel editor-panel">
+      <section className="dual-grid console-workspace-grid">
+        <article className="surface emphasis-surface tall-panel console-editor-surface">
           <PanelHeader title="策略编排台" subtitle="支持 Markdown、AI 推理说明与风险条款，适合直接写中文策略。" />
           <form className="stack" onSubmit={handleUpload}>
             <div className="info-box editor-note">
@@ -680,14 +672,14 @@ export default function ConsolePage() {
             />
             <div className="form-footer">
               <p>上传后会生成可回放、可激活实时任务的统一策略版本。</p>
-              <button className="primary-button" type="submit" disabled={loading}>
+              <button className="action-button is-primary" type="submit" disabled={loading}>
                 上传策略
               </button>
             </div>
           </form>
         </article>
 
-        <article className="panel tall-panel">
+        <article className="surface tall-panel">
           <PanelHeader title="执行实验室" subtitle="选择策略、对齐历史覆盖窗口，然后发起回放或进入实时信号阶段。" />
           <div className="stack compact">
             <label>
@@ -705,13 +697,13 @@ export default function ConsolePage() {
               </select>
             </label>
 
-            <div className="info-box skill-status-box">
-              <div className="info-head">
-                <strong>{selectedSkill?.title ?? '还没有策略版本'}</strong>
-                <span className={`status-chip chip-${toneForStatus(selectedSkill?.validation_status)}`}>
-                  {selectedSkill ? describeStatus(selectedSkill.validation_status) : '等待创建'}
-                </span>
-              </div>
+              <div className="info-box skill-status-box">
+                <div className="info-head">
+                  <strong>{selectedSkill?.title ?? '还没有策略版本'}</strong>
+                  <span className={`status-pill is-${toneForStatus(selectedSkill?.validation_status)}`}>
+                    {selectedSkill ? describeStatus(selectedSkill.validation_status) : '等待创建'}
+                  </span>
+                </div>
               <p>验证状态：{selectedSkill ? describeStatus(selectedSkill.validation_status) : '--'}</p>
               <p>提取方式：{selectedSkill ? describeExtractionMethod(selectedSkill.extraction_method) : '--'}</p>
               <p>执行节奏：{selectedSkill?.envelope?.trigger?.value ?? '--'}</p>
@@ -769,7 +761,7 @@ export default function ConsolePage() {
                   disabled={!hasHistoricalCoverage}
                 />
               </label>
-              <button className="primary-button" type="submit" disabled={loading || !selectedSkill || !hasHistoricalCoverage}>
+              <button className="action-button is-primary" type="submit" disabled={loading || !selectedSkill || !hasHistoricalCoverage}>
                 发起回放
               </button>
             </form>
@@ -786,10 +778,10 @@ export default function ConsolePage() {
             </div>
 
             <div className="field-row action-row">
-              <button className="secondary-button" type="button" onClick={handleActivateLiveTask} disabled={loading || !selectedSkill}>
+              <button className="action-button" type="button" onClick={handleActivateLiveTask} disabled={loading || !selectedSkill}>
                 开启实时任务
               </button>
-              <button className="primary-button" type="button" onClick={handleTriggerLiveTask} disabled={loading || !selectedTask}>
+              <button className="action-button is-primary" type="button" onClick={handleTriggerLiveTask} disabled={loading || !selectedTask}>
                 立即触发一次
               </button>
             </div>
@@ -797,8 +789,8 @@ export default function ConsolePage() {
         </article>
       </section>
 
-      <section className="grid list-grid">
-        <article className="panel">
+      <section className="console-list-grid">
+        <article className="surface">
           <PanelHeader title="策略列表" subtitle="查看所有策略版本，并快速切换当前工作对象。" />
           <div className="list-shell">
             {skills.length ? (
@@ -821,7 +813,7 @@ export default function ConsolePage() {
           </div>
         </article>
 
-        <article className="panel">
+        <article className="surface">
           <PanelHeader title="回放记录" subtitle="选中任意一次回放，即可在下方查看完整执行轨迹。" />
           <div className="list-shell">
             {backtests.length ? (
@@ -849,7 +841,7 @@ export default function ConsolePage() {
           </div>
         </article>
 
-        <article className="panel">
+        <article className="surface">
           <PanelHeader title="最近信号" subtitle="查看最近一次实时任务输出的交易动作与方向。" />
           <div className="list-shell">
             {signals.length ? (
@@ -877,13 +869,14 @@ export default function ConsolePage() {
         </article>
       </section>
 
-      <section className="grid">
-        <article className="panel trace-panel">
+      <section className="stack-section">
+        <article className="surface trace-panel">
           <PanelHeader
             title="执行轨迹"
             subtitle="按触发步骤查看 Agent 推理摘要、工具链路与结构化决策。"
             action={
               <button
+                className="action-button"
                 type="button"
                 onClick={() => selectedBacktest?.id && refreshTraceViewer(selectedBacktest.id)}
                 disabled={!selectedBacktest?.id || traceLoading}
@@ -953,13 +946,13 @@ export default function ConsolePage() {
                             <strong>{formatTime(trace.trigger_time_ms)}</strong>
                           </div>
                           <div className="trace-pill-row">
-                            <span className={`status-chip action-chip action-${rawAction}`}>{describeAction(rawAction)}</span>
+                            <span className={`status-pill console-action-pill action-${rawAction}`}>{describeAction(rawAction)}</span>
                             {typeof trace.decision.symbol === 'string' ? (
-                              <span className="status-chip chip-neutral">{trace.decision.symbol}</span>
+                              <span className="status-pill is-neutral">{trace.decision.symbol}</span>
                             ) : null}
-                            <span className="status-chip chip-neutral">{trace.tool_calls.length} 个工具</span>
+                            <span className="status-pill is-neutral">{trace.tool_calls.length} 个工具</span>
                             {simulatedReturn !== null ? (
-                              <span className={`status-chip ${simulatedReturn >= 0 ? 'chip-ok' : 'chip-error'}`}>
+                              <span className={`status-pill ${simulatedReturn >= 0 ? 'is-ok' : 'is-error'}`}>
                                 {formatPercent(simulatedReturn)}
                               </span>
                             ) : null}
@@ -1011,7 +1004,6 @@ export default function ConsolePage() {
           )}
         </article>
       </section>
-      </div>
     </div>
   );
 }
