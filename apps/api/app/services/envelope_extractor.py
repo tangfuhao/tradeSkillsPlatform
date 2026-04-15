@@ -13,7 +13,6 @@ from jsonschema import Draft202012Validator
 from app.core.config import REPO_ROOT
 
 SCHEMA_PATH = REPO_ROOT / "packages" / "shared-schemas" / "skill-envelope.schema.json"
-DEFAULT_RUNTIME_MODES = ["backtest", "live_signal"]
 DEFAULT_OPTIONAL_TOOLS = ["get_market_metadata"]
 DEFAULT_OUTPUT_CONTRACT = {
     "schema": "trade_signal_v1",
@@ -155,7 +154,6 @@ def merge_envelope_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[st
 def apply_envelope_defaults(envelope: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(envelope)
     merged.setdefault("schema_version", "skill_envelope.v1")
-    merged.setdefault("runtime_modes", list(DEFAULT_RUNTIME_MODES))
 
     trigger = merged.setdefault("trigger", {})
     if isinstance(trigger, dict):

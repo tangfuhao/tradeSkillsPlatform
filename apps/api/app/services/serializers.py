@@ -16,7 +16,7 @@ LEGACY_TRACE_EXECUTION_TIMING_KEY = "_execution_timing"
 
 
 def skill_to_dict(skill: Skill, *, has_active_live_runtime: bool = False, active_live_task_id: str | None = None) -> dict:
-    envelope = skill.envelope_json or {}
+    envelope = _public_skill_envelope(skill.envelope_json)
     extraction_meta = envelope.get("extraction_meta") if isinstance(envelope, dict) else {}
     extraction_method = str((extraction_meta or {}).get("method") or "rule_only")
     fallback_used = bool((extraction_meta or {}).get("fallback_used") or extraction_method == "llm_fallback")
@@ -142,6 +142,12 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "signal": normalized_signal,
         "created_at_ms": datetime_to_ms(signal.created_at),
     }
+
+
+def _public_skill_envelope(raw_envelope: dict | None) -> dict:
+    envelope = dict(raw_envelope or {})
+    envelope.pop("runtime_modes", None)
+    return envelope
 
 
 def _extract_trace_runtime_metrics(decision: dict) -> tuple[dict | None, dict | None, list[dict], dict | None]:

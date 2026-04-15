@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
 from app.models import Skill
+from app.services.serializers import skill_to_dict
 from app.services.skills import create_skill
 
 
@@ -76,6 +77,7 @@ class SkillCreationTests(unittest.TestCase):
         self.assertEqual(created["extraction_method"], "rule_only")
         self.assertFalse(created["fallback_used"])
         self.assertEqual(created["envelope"]["trigger"]["value"], "15m")
+        self.assertNotIn("runtime_modes", created["envelope"])
 
     def test_create_skill_uses_llm_fallback_without_overwriting_rule_fields(self) -> None:
         fallback_response = {
@@ -179,6 +181,19 @@ class SkillCreationTests(unittest.TestCase):
         self.assertEqual(extraction_meta["method"], "rule_only")
         self.assertFalse(extraction_meta["fallback_used"])
         self.assertIn("reasoning_summary", extraction_meta)
+        self.assertNotIn("runtime_modes", stored.envelope_json)
+
+    def test_skill_serializer_hides_legacy_runtime_modes(self) -> None:
+        created = create_skill(self.db, None, RULE_ONLY_SKILL)
+        stored = self.db.scalars(select(Skill).where(Skill.id == created["id"])).one()
+        stored.envelope_json = {
+            **stored.envelope_json,
+            "runtime_modes": ["backtest", "live_signal"],
+        }
+
+        payload = skill_to_dict(stored)
+
+        self.assertNotIn("runtime_modes", payload["envelope"])
 
 
 if __name__ == "__main__":

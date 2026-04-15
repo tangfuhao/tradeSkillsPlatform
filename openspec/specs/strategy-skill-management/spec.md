@@ -15,11 +15,15 @@ The platform SHALL allow a user to upload a Markdown Skill as plain text, option
 - **THEN** the platform rejects the upload and returns validation errors explaining what is missing
 
 ### Requirement: The platform extracts a Skill Envelope from the uploaded Skill
-The platform SHALL extract and store a lightweight Skill Envelope from each valid Skill, including runtime modes, cadence, tool requirements, output schema, market context, and hard risk boundaries.
+The platform SHALL extract and store a lightweight Skill Envelope from each valid Skill, including cadence, tool requirements, output schema, market context, execution/state contracts, and hard risk boundaries.
 
 #### Scenario: Envelope extraction succeeds
-- **WHEN** automated extraction can identify cadence, runtime modes, and required tool signals from the Skill text
+- **WHEN** automated extraction can identify cadence and required tool signals from the Skill text
 - **THEN** the platform stores the extracted Skill Envelope and makes the Skill available for execution
+
+#### Scenario: One Skill supports both execution contexts
+- **WHEN** a Skill passes automated validation and envelope extraction
+- **THEN** the platform treats that Skill as one immutable execution contract that can be invoked in historical replay (`backtest`) or live triggering (`live_signal`) without a separate capability declaration on the Skill itself
 
 #### Scenario: Envelope extraction fails safely
 - **WHEN** the platform cannot reliably identify required runtime information from the Skill text
@@ -63,4 +67,3 @@ The platform SHALL allow strategy deletion and SHALL remove linked backtests, li
 #### Scenario: User deletes a strategy with linked executions
 - **WHEN** a user confirms deletion of a strategy that owns backtests or a live runtime
 - **THEN** the platform removes the strategy and its owned execution artifacts together so no orphaned execution state remains
-

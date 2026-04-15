@@ -5,7 +5,6 @@
   "type": "object",
   "required": [
     "schema_version",
-    "runtime_modes",
     "trigger",
     "tool_contract",
     "output_contract",
@@ -15,14 +14,6 @@
   "properties": {
     "schema_version": {
       "type": "string"
-    },
-    "runtime_modes": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "enum": ["backtest", "live_signal"]
-      },
-      "minItems": 1
     },
     "trigger": {
       "type": "object",

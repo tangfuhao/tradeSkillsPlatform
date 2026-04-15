@@ -1,4 +1,3 @@
-export type SkillRuntimeMode = 'backtest' | 'live_signal' | string;
 export type ExecutionAction =
   | 'pause'
   | 'resume'
@@ -47,7 +46,6 @@ export type ServicePulse = {
 
 export type SkillEnvelope = {
   schema_version?: string;
-  runtime_modes?: SkillRuntimeMode[];
   trigger?: SkillTrigger;
   market_context?: Record<string, unknown>;
   tool_contract?: SkillToolContract;

@@ -71,7 +71,6 @@ export default function StrategyProfilePage() {
     return buildStrategyInsights([skill], liveTasks, signals, backtests, portfoliosByTaskId)[0] ?? null;
   }, [backtests, liveTasks, portfoliosByTaskId, signals, skill]);
 
-  const runtimeModes = skill?.envelope.runtime_modes ?? [];
   const risk = skill?.envelope.risk_contract;
   const toolContract = skill?.envelope.tool_contract;
   const extractionMeta = skill?.envelope.extraction_meta;
@@ -105,9 +104,9 @@ export default function StrategyProfilePage() {
       term: '触发节奏',
       value: skill ? getSkillCadence(skill) : '--',
       detail: skill ? describeTriggerMode(skill.envelope.trigger?.trigger_on) : '读取中',
-      sideLabel: '运行模式',
-      sideValue: runtimeModes.length ? runtimeModes.join(' / ') : '未声明',
-      sideDetail: '策略定义只读，修改请创建新版本。',
+      sideLabel: '执行上下文',
+      sideValue: '历史回放 / 实时触发',
+      sideDetail: '同一份策略定义同时适用于回放和实时执行；修改请创建新版本。',
     },
     {
       term: '风险约束',

@@ -6,7 +6,7 @@
 
 TradeSkills 当前不是一个多角色协作的 Agent 系统，而是一个统一的交易执行 Agent Runtime：
 
-- 同一份 Skill 可以运行在 `backtest` 和 `live_signal` 两种模式下
+- 同一份 Skill 可以在 `backtest` 和 `live_signal` 两种执行上下文下运行
 - Agent Runner 负责读取 Skill、调用工具、产出结构化决策
 - API 侧负责提供 Tool Gateway、维护策略状态、管理组合与落库结果
 
