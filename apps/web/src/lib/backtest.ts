@@ -1,4 +1,4 @@
-import type { MarketOverview } from '../types';
+import type { ExecutionAction, MarketOverview } from '../types';
 import { toDateTimeLocal } from './formatting';
 
 export const DEFAULT_BACKTEST_INITIAL_CAPITAL = 10_000;
@@ -151,4 +151,13 @@ export function resolveBacktestLaunchRequest({
     },
     error: null,
   };
+}
+
+export function getBacktestControlActionLabel(action: ExecutionAction, status?: string | null): string {
+  if (action === 'resume') {
+    return status === 'failed' ? '恢复执行' : '继续';
+  }
+  if (action === 'pause') return '暂停';
+  if (action === 'stop') return '停止';
+  return action;
 }

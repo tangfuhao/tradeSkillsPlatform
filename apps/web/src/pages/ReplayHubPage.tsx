@@ -9,6 +9,7 @@ import LoadingSkeleton from '../components/LoadingSkeleton';
 import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
 import { controlBacktest, deleteBacktest, listBacktests, listSkills } from '../api';
+import { getBacktestControlActionLabel } from '../lib/backtest';
 import {
   describeStatus,
   formatCount,
@@ -125,7 +126,7 @@ export default function ReplayHubPage() {
         toast.success('回测已删除');
       } else {
         await controlBacktest(run.id, action);
-        toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
+        toast.success(`回测已${getBacktestControlActionLabel(action, run.status)}`);
       }
       await load();
     } catch (nextError) {
@@ -274,6 +275,7 @@ export default function ReplayHubPage() {
                         disabled={isPending}
                         onAction={(action) => handleAction(run, action)}
                         pendingAction={run.pending_action}
+                        status={run.status}
                       />
                     </div>
                   </div>

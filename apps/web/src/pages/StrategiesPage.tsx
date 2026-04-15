@@ -25,6 +25,7 @@ import {
 } from '../api';
 import {
   DEFAULT_BACKTEST_INITIAL_CAPITAL,
+  getBacktestControlActionLabel,
   getDefaultBacktestWindow,
   getDefaultBacktestWindowMs,
   getHistoricalCoverageWindow,
@@ -307,7 +308,7 @@ export default function StrategiesPage() {
         toast.success('回测已删除');
       } else {
         await controlBacktest(run.id, action);
-        toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
+        toast.success(`回测已${getBacktestControlActionLabel(action, run.status)}`);
       }
       await load();
     } catch (nextError) {
@@ -564,6 +565,7 @@ export default function StrategiesPage() {
                                               disabled={(pendingKey?.startsWith(`${run.id}:`) ?? false) || loading}
                                               onAction={(action) => handleBacktestAction(run, action)}
                                               pendingAction={pendingKey?.startsWith(`${run.id}:`) ? pendingKey.split(':')[1] ?? null : null}
+                                              status={run.status}
                                             />
                                           </div>
                                         </div>

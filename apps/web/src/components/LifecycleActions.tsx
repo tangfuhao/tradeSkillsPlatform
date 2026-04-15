@@ -1,9 +1,11 @@
 import type { ExecutionAction } from '../types';
+import { getBacktestControlActionLabel } from '../lib/backtest';
 
 type LifecycleActionsProps = {
   actions: ExecutionAction[];
   disabled?: boolean;
   pendingAction?: string | null;
+  status?: string | null;
   onAction: (action: ExecutionAction) => void;
 };
 
@@ -28,6 +30,7 @@ export default function LifecycleActions({
   actions,
   disabled = false,
   pendingAction,
+  status,
   onAction,
 }: LifecycleActionsProps) {
   if (!actions.length) return null;
@@ -42,7 +45,7 @@ export default function LifecycleActions({
           onClick={() => onAction(action)}
           type="button"
         >
-          {pendingAction === action ? '处理中...' : ACTION_LABELS[action] ?? action}
+          {pendingAction === action ? '处理中...' : action === 'resume' ? getBacktestControlActionLabel(action, status) : ACTION_LABELS[action] ?? action}
         </button>
       ))}
     </div>

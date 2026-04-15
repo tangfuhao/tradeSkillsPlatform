@@ -8,6 +8,7 @@ import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
 import ReplayChart from '../components/ReplayChart';
 import { controlBacktest, deleteBacktest, getBacktest, getBacktestPortfolio, getSkill, listBacktestTraces, listMarketCandles } from '../api';
+import { getBacktestControlActionLabel } from '../lib/backtest';
 import {
   describeAction,
   describeDirection,
@@ -154,7 +155,7 @@ export default function ReplayPage() {
         return;
       }
       await controlBacktest(run.id, action);
-      toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
+      toast.success(`回测已${getBacktestControlActionLabel(action, run.status)}`);
       await load();
     } catch (nextError) {
       toast.error(getErrorMessage(nextError));
@@ -237,6 +238,7 @@ export default function ReplayPage() {
             disabled={!run || Boolean(pendingAction)}
             onAction={(action) => handleAction(action)}
             pendingAction={pendingAction}
+            status={run?.status}
           />
         }
       />
@@ -293,6 +295,9 @@ export default function ReplayPage() {
               </div>
               <div className="spec-main">
                 <strong>{run.error_message}</strong>
+                {run.status === 'failed' ? (
+                  <p>点击“恢复执行”后，系统会从上次成功 checkpoint 后继续执行；如果首个 checkpoint 前失败，则会从第 1 步重新开始。</p>
+                ) : null}
               </div>
               <div className="spec-side">
                 <span className="spec-side-label">最近活动</span>

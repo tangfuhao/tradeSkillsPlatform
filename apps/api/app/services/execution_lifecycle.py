@@ -39,7 +39,9 @@ def backtest_available_actions(status: str) -> list[str]:
         return ["pause", "stop"]
     if status == BACKTEST_STATUS_PAUSED:
         return ["resume", "stop", "delete"]
-    if status in {BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_COMPLETED, BACKTEST_STATUS_FAILED}:
+    if status == BACKTEST_STATUS_FAILED:
+        return ["resume", "delete"]
+    if status in {BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_COMPLETED}:
         return ["delete"]
     return []
 

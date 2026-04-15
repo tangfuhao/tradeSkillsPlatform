@@ -27,8 +27,10 @@ from app.services.backtest_service import BacktestService, execute_backtest_job
 from app.services.execution_cleanup import delete_strategy_cascade
 from app.services.execution_lifecycle import (
     BACKTEST_STATUS_COMPLETED,
+    BACKTEST_STATUS_FAILED,
     BACKTEST_STATUS_PAUSED,
     BACKTEST_STATUS_RUNNING,
+    BACKTEST_STATUS_STOPPED,
     LIVE_STATUS_ACTIVE,
     LIVE_STATUS_PAUSED,
     LIVE_STATUS_STOPPED,
@@ -175,6 +177,201 @@ class ExecutionLifecycleTests(unittest.TestCase):
             ),
             0,
         )
+
+    def test_failed_backtest_resumes_from_last_successful_checkpoint(self) -> None:
+        skill = self.create_skill(title="Recoverable Backtest Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=45)
+        trigger_times = [start_time, start_time + timedelta(minutes=15), start_time + timedelta(minutes=30)]
+        response_payload = {
+            "decision": {"action": "skip"},
+            "reasoning_summary": "Wait for confirmation.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                created = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                run_id = created["id"]
+
+            agent_responses = [
+                response_payload,
+                RuntimeError("runner exploded"),
+            ]
+
+            def fail_on_second_step(_payload):
+                next_item = agent_responses.pop(0)
+                if isinstance(next_item, Exception):
+                    raise next_item
+                return next_item
+
+            with patch("app.services.backtest_service.execute_agent_run", side_effect=fail_on_second_step):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                service = BacktestService(db)
+                failed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(failed_run)
+                assert failed_run is not None
+                self.assertEqual(failed_run.status, BACKTEST_STATUS_FAILED)
+                self.assertEqual(failed_run.completed_trigger_count, 1)
+                self.assertIn("Backtest step 2", failed_run.error_message or "")
+                failed_payload = service.get_run(run_id)
+                self.assertEqual(failed_payload["available_actions"], ["resume", "delete"])
+                trace_rows = db.scalars(
+                    select(RunTrace).where(RunTrace.run_id == run_id).order_by(RunTrace.trace_index.asc())
+                ).all()
+                self.assertEqual(len(trace_rows), 1)
+                first_trace_id = trace_rows[0].id
+
+            with self.session_factory() as db:
+                resumed_payload, should_enqueue = BacktestService(db).control_run(run_id, "resume")
+                self.assertTrue(should_enqueue)
+                self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
+                self.assertIsNone(resumed_payload["error_message"])
+
+            with patch("app.services.backtest_service.execute_agent_run", return_value=response_payload):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                completed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(completed_run)
+                assert completed_run is not None
+                self.assertEqual(completed_run.status, BACKTEST_STATUS_COMPLETED)
+                self.assertEqual(completed_run.completed_trigger_count, 3)
+                trace_rows = db.scalars(
+                    select(RunTrace).where(RunTrace.run_id == run_id).order_by(RunTrace.trace_index.asc())
+                ).all()
+                self.assertEqual([trace.trace_index for trace in trace_rows], [0, 1, 2])
+                self.assertEqual(trace_rows[0].id, first_trace_id)
+                self.assertIsNotNone(completed_run.summary_json)
+
+    def test_failed_backtest_can_resume_finalization_without_rerunning_triggers(self) -> None:
+        skill = self.create_skill(title="Finalization Resume Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=45)
+        trigger_times = [start_time, start_time + timedelta(minutes=15), start_time + timedelta(minutes=30)]
+        response_payload = {
+            "decision": {"action": "skip"},
+            "reasoning_summary": "Stay flat.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                created = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                run_id = created["id"]
+
+            with (
+                patch("app.services.backtest_service.execute_agent_run", return_value=response_payload),
+                patch(
+                    "app.services.backtest_service.compute_max_drawdown",
+                    side_effect=[RuntimeError("summary aggregation failed"), 0.0],
+                ),
+            ):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                service = BacktestService(db)
+                failed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(failed_run)
+                assert failed_run is not None
+                self.assertEqual(failed_run.status, BACKTEST_STATUS_FAILED)
+                self.assertEqual(failed_run.completed_trigger_count, 3)
+                self.assertEqual(failed_run.total_trigger_count, 3)
+                self.assertIsNone(failed_run.summary_json)
+                failed_payload = service.get_run(run_id)
+                self.assertEqual(failed_payload["progress"]["completed_steps"], 3)
+                self.assertEqual(failed_payload["progress"]["total_steps"], 3)
+                self.assertEqual(failed_payload["available_actions"], ["resume", "delete"])
+
+            with self.session_factory() as db:
+                resumed_payload, should_enqueue = BacktestService(db).control_run(run_id, "resume")
+                self.assertTrue(should_enqueue)
+                self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
+
+            with patch(
+                "app.services.backtest_service.execute_agent_run",
+                side_effect=AssertionError("resume should not rerun completed trigger steps"),
+            ):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                completed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(completed_run)
+                assert completed_run is not None
+                self.assertEqual(completed_run.status, BACKTEST_STATUS_COMPLETED)
+                self.assertEqual(completed_run.completed_trigger_count, 3)
+                self.assertIsNotNone(completed_run.summary_json)
+                self.assertEqual(
+                    db.scalar(select(func.count()).select_from(RunTrace).where(RunTrace.run_id == run_id)),
+                    3,
+                )
+
+    def test_stopped_and_completed_backtests_cannot_resume(self) -> None:
+        skill = self.create_skill(title="Non-resumable Backtest Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=30)
+        trigger_times = [start_time, start_time + timedelta(minutes=15)]
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+        ):
+            with self.session_factory() as db:
+                stopped_run = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                completed_run = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                stopped_id = stopped_run["id"]
+                completed_id = completed_run["id"]
+
+            with self.session_factory() as db:
+                stopped = db.get(BacktestRun, stopped_id)
+                completed = db.get(BacktestRun, completed_id)
+                self.assertIsNotNone(stopped)
+                self.assertIsNotNone(completed)
+                assert stopped is not None
+                assert completed is not None
+                stopped.status = BACKTEST_STATUS_STOPPED
+                completed.status = BACKTEST_STATUS_COMPLETED
+                completed.total_trigger_count = 2
+                completed.completed_trigger_count = 2
+                db.add(stopped)
+                db.add(completed)
+                db.commit()
+
+            with self.session_factory() as db:
+                service = BacktestService(db)
+                with self.assertRaises(ValueError):
+                    service.control_run(stopped_id, "resume")
+                with self.assertRaises(ValueError):
+                    service.control_run(completed_id, "resume")
 
     def test_live_runtime_duplicate_activation_controls_signal_serialization_and_cleanup(self) -> None:
         skill = self.create_skill(title="Live Skill")

@@ -120,10 +120,13 @@ class BacktestService:
             else:
                 raise ValueError(f"Cannot pause a backtest in status '{run.status}'.")
         elif normalized == "resume":
-            if run.status != BACKTEST_STATUS_PAUSED:
+            if run.status not in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_FAILED}:
                 raise ValueError(f"Cannot resume a backtest in status '{run.status}'.")
-            if run.completed_trigger_count >= run.total_trigger_count > 0:
+            if run.status == BACKTEST_STATUS_PAUSED and run.completed_trigger_count >= run.total_trigger_count > 0:
                 raise ValueError("Backtest has already completed.")
+            skill = self.db.get(Skill, run.skill_id)
+            if skill is None:
+                raise LookupError("Skill missing for backtest run.")
             run.status = BACKTEST_STATUS_RUNNING
             run.control_requested = None
             run.error_message = None
