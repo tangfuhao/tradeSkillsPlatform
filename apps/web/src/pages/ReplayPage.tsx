@@ -101,6 +101,15 @@ export default function ReplayPage() {
     [selectedSymbol, symbolSlices],
   );
 
+  const timelineTraces = useMemo(() => {
+    const list = selectedSlice?.traces ?? [];
+    return [...list].sort((a, b) => {
+      const timeDiff = (b.trigger_time_ms ?? 0) - (a.trigger_time_ms ?? 0);
+      if (timeDiff !== 0) return timeDiff;
+      return (b.trace_index ?? 0) - (a.trace_index ?? 0);
+    });
+  }, [selectedSlice?.symbol, selectedSlice?.traces]);
+
   useEffect(() => {
     if (!run || !selectedSlice?.symbol) {
       setCandles([]);
@@ -405,9 +414,9 @@ export default function ReplayPage() {
               <h2>当前标的时间线</h2>
             </div>
           </div>
-          {selectedSlice?.traces.length ? (
-            <div className="timeline-list">
-              {selectedSlice.traces.map((trace) => (
+          {timelineTraces.length ? (
+            <div className="timeline-list" style={{ maxHeight: 420, overflowY: 'auto', paddingRight: 4 }}>
+              {timelineTraces.map((trace) => (
                 <article className="timeline-item" key={trace.id}>
                   <div className="timeline-head">
                     <div>
