@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 
+import AutoRefreshDot from '../components/AutoRefreshDot';
+import ConfirmDialog from '../components/ConfirmDialog';
 import LifecycleActions from '../components/LifecycleActions';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
 import { controlBacktest, deleteBacktest, listBacktests, listSkills } from '../api';
 import {
@@ -21,21 +26,52 @@ type ReplayData = {
   skills: Skill[];
 };
 
+type StatusFilter = 'all' | 'active' | 'completed' | 'failed';
+
+const FILTER_OPTIONS: { key: StatusFilter; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'active', label: '运行中' },
+  { key: 'completed', label: '已完成' },
+  { key: 'failed', label: '失败/停止' },
+];
+
+function matchesFilter(run: BacktestRun, filter: StatusFilter): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'active') return ['queued', 'running', 'paused', 'stopping'].includes(run.status);
+  if (filter === 'completed') return run.status === 'completed';
+  return run.status === 'failed' || run.status === 'stopped';
+}
+
 function progressWidth(run: BacktestRun): string {
   return `${Math.round((run.progress?.percent ?? 0) * 100)}%`;
 }
+
+type ConfirmState = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  tone: 'danger' | 'warning';
+  onConfirm: () => void;
+} | null;
 
 export default function ReplayHubPage() {
   const [data, setData] = useState<ReplayData>({ backtests: [], skills: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [filter, setFilter] = useState<StatusFilter>('all');
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
+  const lastRefreshRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
       const [backtests, skills] = await Promise.all([listBacktests(), listSkills()]);
       setData({ backtests, skills });
       setError(null);
+      const now = Date.now();
+      lastRefreshRef.current = now;
+      setLastRefreshMs(now);
     } catch (nextError) {
       setError(getErrorMessage(nextError));
     } finally {
@@ -52,6 +88,7 @@ export default function ReplayHubPage() {
   }, [load]);
 
   const skillById = useMemo(() => new Map(data.skills.map((skill) => [skill.id, skill])), [data.skills]);
+  const filtered = useMemo(() => data.backtests.filter((run) => matchesFilter(run, filter)), [data.backtests, filter]);
 
   const stats = useMemo(
     () => [
@@ -79,68 +116,106 @@ export default function ReplayHubPage() {
     [data.backtests],
   );
 
-  async function handleAction(run: BacktestRun, action: ExecutionAction) {
-    if (action === 'delete') {
-      const confirmed = window.confirm(`删除回测 ${run.id}？\n\n这会同时删除该回测的 traces、组合状态和执行细节。`);
-      if (!confirmed) return;
-    }
-    if (action === 'stop') {
-      const confirmed = window.confirm(`停止回测 ${run.id}？\n\n当前进度会保留，后续可删除。`);
-      if (!confirmed) return;
-    }
-
+  async function executeAction(run: BacktestRun, action: ExecutionAction) {
     const key = `${run.id}:${action}`;
     setPendingKey(key);
     try {
       if (action === 'delete') {
         await deleteBacktest(run.id);
+        toast.success('回测已删除');
       } else {
         await controlBacktest(run.id, action);
+        toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
       }
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
   }
 
+  function handleAction(run: BacktestRun, action: ExecutionAction) {
+    if (action === 'delete') {
+      setConfirm({
+        title: '删除回测',
+        description: '删除后将清除该回测的 traces、组合状态和执行细节，且无法恢复。',
+        confirmLabel: '确认删除',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeAction(run, action);
+        },
+      });
+      return;
+    }
+    if (action === 'stop') {
+      setConfirm({
+        title: '停止回测',
+        description: '当前进度会保留，后续可以删除此回测。',
+        confirmLabel: '确认停止',
+        tone: 'warning',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeAction(run, action);
+        },
+      });
+      return;
+    }
+    void executeAction(run, action);
+  }
+
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Backtest Operations</p>
-          <h1>把回测列表改成操作面板，而不是只读剧场。</h1>
-          <p className="hero-copy">
-            每条回测都直接暴露状态、进度、执行窗口、结果与可用动作；回测详情页则专注当前 run，而不是竞争性地展示其它列表。
-          </p>
-        </div>
-        <div className="hero-meta">
-          <span className="info-pill">支持暂停 / 继续 / 停止 / 删除</span>
-          <Link className="action-button is-primary" to="/strategies">
-            去策略页发起新回测
-          </Link>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="回测管理"
+        title="回测工作台"
+        description="查看、控制所有回测运行。点击行进入详情页。"
+        actions={
+          <>
+            <AutoRefreshDot lastRefreshMs={lastRefreshMs} />
+            <Link className="action-button is-primary" to="/strategies">
+              发起新回测
+            </Link>
+          </>
+        }
+      />
 
-      <section className="metric-grid">
-        {stats.map((stat) => (
-          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
-        ))}
-      </section>
+      {loading && !data.backtests.length ? (
+        <LoadingSkeleton variant="stat" />
+      ) : (
+        <section className="metric-grid">
+          {stats.map((stat) => (
+            <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </section>
+      )}
 
-      {error ? <div className="feedback-banner is-error">回测列表加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="surface">
         <div className="section-head">
           <div>
-            <p className="section-eyebrow">Replay Records</p>
-            <h2>回测工作台</h2>
+            <p className="section-eyebrow">回测记录</p>
+            <h2>回测列表</h2>
           </div>
-          <span className="section-note">点击行进入详情，右侧动作直接控制执行生命周期。</span>
+          <div className="filter-row">
+            {FILTER_OPTIONS.map((opt) => (
+              <button
+                className={`filter-chip${filter === opt.key ? ' is-active' : ''}`}
+                key={opt.key}
+                onClick={() => setFilter(opt.key)}
+                type="button"
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {data.backtests.length ? (
+        {loading && !data.backtests.length ? (
+          <LoadingSkeleton rows={4} />
+        ) : filtered.length ? (
           <>
             <div className="table-head replay-ledger-head">
               <span>策略 / 回测</span>
@@ -150,7 +225,7 @@ export default function ReplayHubPage() {
               <span>最后活动</span>
             </div>
             <div className="record-list">
-              {data.backtests.map((run) => {
+              {filtered.map((run) => {
               const owner = skillById.get(run.skill_id);
               const result = getRunReturnPct(run);
               const isPending = pendingKey?.startsWith(`${run.id}:`) ?? false;
@@ -158,7 +233,10 @@ export default function ReplayHubPage() {
                 <article className="record-row dense-record" key={run.id}>
                   <div className="record-main">
                     <div className="record-cell">
-                      <p className="record-title">{owner?.title ?? run.skill_id}</p>
+                      <p className="record-title">
+                        <span className={`status-dot is-${toneForStatus(run.status)}`} />
+                        {owner?.title ?? run.skill_id}
+                      </p>
                       <p className="record-subtitle">{run.id}</p>
                     </div>
                     <div className="record-cell">
@@ -185,7 +263,7 @@ export default function ReplayHubPage() {
                       <div className="progress-bar">
                         <span className="progress-fill" style={{ width: progressWidth(run) }} />
                       </div>
-                      <span className="record-subtitle">{run.error_message ?? '结果汇总与时间线已保留。'}</span>
+                      <span className="record-subtitle">{run.error_message ?? ''}</span>
                     </div>
                     <div className="action-cluster">
                       <Link className="action-button" to={`/replays/${run.id}`}>
@@ -194,7 +272,7 @@ export default function ReplayHubPage() {
                       <LifecycleActions
                         actions={run.available_actions}
                         disabled={isPending}
-                        onAction={(action) => void handleAction(run, action)}
+                        onAction={(action) => handleAction(run, action)}
                         pendingAction={run.pending_action}
                       />
                     </div>
@@ -206,11 +284,27 @@ export default function ReplayHubPage() {
           </>
         ) : (
           <div className="empty-state">
-            <strong>{loading ? '回测数据读取中...' : '还没有回测记录'}</strong>
-            <p>去策略页选择策略并配置回测窗口，这里会自动成为回测操作面板。</p>
+            <strong>
+              {data.backtests.length ? '没有符合筛选条件的回测' : loading ? '回测数据读取中...' : '还没有回测记录'}
+            </strong>
+            <p>
+              {data.backtests.length
+                ? '调整筛选条件查看更多回测。'
+                : '去策略页选择策略并配置回测窗口即可开始。'}
+            </p>
           </div>
         )}
       </section>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        onOpenChange={(open) => { if (!open) setConfirm(null); }}
+        title={confirm?.title ?? ''}
+        description={confirm?.description ?? ''}
+        confirmLabel={confirm?.confirmLabel ?? '确认'}
+        tone={confirm?.tone ?? 'danger'}
+        onConfirm={confirm?.onConfirm ?? (() => {})}
+      />
     </div>
   );
 }

@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 
+import AutoRefreshDot from '../components/AutoRefreshDot';
+import ConfirmDialog from '../components/ConfirmDialog';
 import LifecycleActions from '../components/LifecycleActions';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
 import { controlLiveTask, deleteLiveTask, getLiveTaskPortfolio, listLiveTasks, listSignals, listSkills, triggerLiveTask } from '../api';
 import {
@@ -25,6 +30,14 @@ type SignalsData = {
   portfoliosByTaskId: Record<string, PortfolioState>;
 };
 
+type ConfirmState = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  tone: 'danger' | 'warning';
+  onConfirm: () => void;
+} | null;
+
 function signalNarrative(signal: LiveSignal): string {
   return signal.signal.reasoning_summary ?? signal.signal.reason ?? '当前信号没有附带更多说明。';
 }
@@ -39,6 +52,9 @@ export default function SignalsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
+  const lastRefreshRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -59,6 +75,9 @@ export default function SignalsPage() {
         portfoliosByTaskId: Object.fromEntries(portfolioEntries),
       });
       setError(null);
+      const now = Date.now();
+      lastRefreshRef.current = now;
+      setLastRefreshMs(now);
     } catch (nextError) {
       setError(getErrorMessage(nextError));
     } finally {
@@ -85,6 +104,7 @@ export default function SignalsPage() {
   );
 
   const monitoredInsights = insights.filter((insight) => insight.liveTask);
+  const hasActiveTasks = data.liveTasks.some((t) => t.status === 'active');
 
   const stats = useMemo(
     () => [
@@ -96,7 +116,7 @@ export default function SignalsPage() {
       {
         label: '实时任务',
         value: formatCount(data.liveTasks.filter((task) => task.status === 'active' || task.status === 'paused').length),
-        detail: '显示收益、活动时间与信号流',
+        detail: '收益、活动时间与信号流',
       },
       {
         label: '最近信号',
@@ -106,76 +126,111 @@ export default function SignalsPage() {
       {
         label: '触达标的',
         value: formatCount(new Set(signalFeed.map((item) => item.signal.signal.symbol).filter(Boolean)).size),
-        detail: '按策略聚合而不是平铺日志',
+        detail: '按策略聚合',
       },
     ],
     [data.liveTasks, data.signals.length, monitoredInsights, signalFeed],
   );
 
-  async function handleRuntimeAction(task: LiveTask, action: ExecutionAction) {
-    if (action === 'delete') {
-      const confirmed = window.confirm(`删除实时运行 ${task.id}？\n\n这会同时删除信号记录与实时组合状态。`);
-      if (!confirmed) return;
-    }
-    if (action === 'stop') {
-      const confirmed = window.confirm(`停止实时运行 ${task.id}？\n\n停止后不会再触发新的模拟信号。`);
-      if (!confirmed) return;
-    }
-
+  async function executeRuntimeAction(task: LiveTask, action: ExecutionAction) {
     const key = `${task.id}:${action}`;
     setPendingKey(key);
     try {
       if (action === 'delete') {
         await deleteLiveTask(task.id);
+        toast.success('实时任务已删除');
       } else if (action === 'trigger') {
         await triggerLiveTask(task.id);
+        toast.success('触发成功');
       } else {
         await controlLiveTask(task.id, action);
+        toast.success(`实时任务已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
       }
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
   }
 
+  function handleRuntimeAction(task: LiveTask, action: ExecutionAction) {
+    if (action === 'delete') {
+      setConfirm({
+        title: '删除实时运行',
+        description: '删除后将清除信号记录与实时组合状态，且无法恢复。',
+        confirmLabel: '确认删除',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeRuntimeAction(task, action);
+        },
+      });
+      return;
+    }
+    if (action === 'stop') {
+      setConfirm({
+        title: '停止实时运行',
+        description: '停止后不会再触发新的模拟信号，已有信号将保留。',
+        confirmLabel: '确认停止',
+        tone: 'warning',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeRuntimeAction(task, action);
+        },
+      });
+      return;
+    }
+    void executeRuntimeAction(task, action);
+  }
+
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Live Monitoring</p>
-          <h1>按实时运行中的策略来监控信号与模拟收益。</h1>
-          <p className="hero-copy">
-            每个分组都围绕一条策略展开：运行状态、组合收益、最近信号和控制动作放在一起看，避免再回到平铺日志模式。
-          </p>
-        </div>
-        <div className="hero-meta">
-          <span className="info-pill">支持立即触发 / 暂停 / 继续 / 停止 / 删除</span>
-          <Link className="action-button is-primary" to="/strategies">
-            打开策略面板
-          </Link>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="实时监控"
+        title="信号与实时运行"
+        description="按策略分组监控实时运行、收益表现和信号流。"
+        status={
+          hasActiveTasks ? (
+            <span className="live-pulse">
+              <span className="live-pulse-dot" />
+              <span className="info-pill is-ok" style={{ fontSize: '0.78rem' }}>实时运行中</span>
+            </span>
+          ) : undefined
+        }
+        actions={
+          <>
+            <AutoRefreshDot lastRefreshMs={lastRefreshMs} />
+            <Link className="action-button" to="/strategies">策略面板</Link>
+          </>
+        }
+      />
 
-      <section className="metric-grid">
-        {stats.map((stat) => (
-          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
-        ))}
-      </section>
+      {loading && !data.skills.length ? (
+        <LoadingSkeleton variant="stat" />
+      ) : (
+        <section className="metric-grid">
+          {stats.map((stat) => (
+            <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </section>
+      )}
 
-      {error ? <div className="feedback-banner is-error">实时信号页加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="dual-grid">
         <section className="stack-section">
-          {monitoredInsights.length ? (
+          {loading && !monitoredInsights.length ? (
+            <section className="surface">
+              <LoadingSkeleton rows={3} />
+            </section>
+          ) : monitoredInsights.length ? (
             <section className="surface">
               <div className="section-head">
                 <div>
-                  <p className="section-eyebrow">Runtime Ledger</p>
-                  <h2>实时运行监控台账</h2>
+                  <p className="section-eyebrow">运行台账</p>
+                  <h2>实时运行监控</h2>
                 </div>
-                <span className="section-note">按策略集中监控实时运行、收益表现和最近信号，不再拆成一组组独立信息卡。</span>
               </div>
 
               <div className="table-head monitor-ledger-head">
@@ -197,9 +252,12 @@ export default function SignalsPage() {
                     <article className="record-row monitor-ledger-row" key={insight.skill.id}>
                       <div className="monitor-row-main">
                         <div className="record-cell">
-                          <p className="record-title">{insight.skill.title}</p>
+                          <p className="record-title">
+                            <span className={`status-dot is-${toneForStatus(task.status)}`} />
+                            {insight.skill.title}
+                          </p>
                           <p className="record-subtitle">
-                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待首个交易标的'}
+                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待首个标的'}
                           </p>
                         </div>
                         <div className="record-cell">
@@ -215,7 +273,7 @@ export default function SignalsPage() {
                         <div className="record-cell">
                           <strong>{formatCount(insight.signals.length)} 条</strong>
                           <p className="record-subtitle">
-                            {latestSignal ? `${latestSignal.signal.symbol ?? '未指定标的'} / ${describeAction(latestSignal.signal.action as string)}` : '当前 runtime 还没有信号样本'}
+                            {latestSignal ? `${latestSignal.signal.symbol ?? '未指定'} / ${describeAction(latestSignal.signal.action as string)}` : '暂无信号'}
                           </p>
                         </div>
                         <div className="record-cell">
@@ -234,7 +292,7 @@ export default function SignalsPage() {
                           <LifecycleActions
                             actions={task.available_actions}
                             disabled={(pendingKey?.startsWith(`${task.id}:`) ?? false) || loading}
-                            onAction={(action) => void handleRuntimeAction(task, action)}
+                            onAction={(action) => handleRuntimeAction(task, action)}
                             pendingAction={pendingKey?.startsWith(`${task.id}:`) ? pendingKey.split(':')[1] ?? null : null}
                           />
                         </div>
@@ -265,8 +323,8 @@ export default function SignalsPage() {
                         </details>
                       ) : (
                         <div className="empty-state compact-empty">
-                          <strong>{loading ? '正在读取信号流...' : '当前 runtime 还没有信号样本'}</strong>
-                          <p>可以使用“立即触发”来验证当前实时策略的信号输出。</p>
+                          <strong>{loading ? '正在读取信号流...' : '暂无信号样本'}</strong>
+                          <p>使用「立即触发」验证当前策略的信号输出。</p>
                         </div>
                       )}
                     </article>
@@ -278,7 +336,7 @@ export default function SignalsPage() {
             <section className="surface">
               <div className="empty-state">
                 <strong>{loading ? '正在连接实时运行...' : '当前没有可监控的实时策略'}</strong>
-                <p>去策略页启动实时模拟后，这里会按策略分组展示信号流和收益表现。</p>
+                <p>去策略页启动实时模拟后，信号流将在此处展示。</p>
               </div>
             </section>
           )}
@@ -287,8 +345,8 @@ export default function SignalsPage() {
         <section className="surface">
           <div className="section-head">
             <div>
-              <p className="section-eyebrow">Recent Signal Tape</p>
-              <h2>最近信号带</h2>
+              <p className="section-eyebrow">信号带</p>
+              <h2>最近信号</h2>
             </div>
           </div>
           {signalFeed.length ? (
@@ -322,11 +380,21 @@ export default function SignalsPage() {
           ) : (
             <div className="empty-state compact-empty">
               <strong>还没有实时信号</strong>
-              <p>当实时策略开始运行，这里会保留最新信号带作为快速检视入口。</p>
+              <p>实时策略运行后，最新信号将自动出现在这里。</p>
             </div>
           )}
         </section>
       </section>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        onOpenChange={(open) => { if (!open) setConfirm(null); }}
+        title={confirm?.title ?? ''}
+        description={confirm?.description ?? ''}
+        confirmLabel={confirm?.confirmLabel ?? '确认'}
+        tone={confirm?.tone ?? 'danger'}
+        onConfirm={confirm?.onConfirm ?? (() => {})}
+      />
     </div>
   );
 }

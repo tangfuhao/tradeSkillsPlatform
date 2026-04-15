@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { toast } from 'sonner';
 
 import { createSkill } from '../api';
 import { getErrorMessage } from '../lib/formatting';
@@ -38,8 +39,6 @@ export default function StrategyComposer({
   const [strategyTitle, setStrategyTitle] = useState('');
   const [strategyText, setStrategyText] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const normalizedTitle = strategyTitle.trim();
   const normalizedSkillLength = strategyText.trim().length;
   const canSubmit = normalizedSkillLength >= 20;
@@ -47,8 +46,6 @@ export default function StrategyComposer({
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
-    setError(null);
-    setSuccess(null);
 
     try {
       const created = await createSkill({
@@ -57,10 +54,10 @@ export default function StrategyComposer({
       });
       setStrategyTitle('');
       setStrategyText('');
-      setSuccess(`已创建策略：${created.title}`);
+      toast.success(`策略已创建：${created.title}`);
       onCreated?.(created);
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(`创建失败：${getErrorMessage(nextError)}`);
     } finally {
       setSubmitting(false);
     }
@@ -71,22 +68,22 @@ export default function StrategyComposer({
       {variant === 'desk' ? (
         <div className="composer-ledger">
           <div className="composer-ledger-cell">
-            <span>entry mode</span>
-            <strong>Skill Intake Desk</strong>
+            <span>录入模式</span>
+            <strong>策略录入台</strong>
           </div>
           <div className="composer-ledger-cell">
-            <span>versioning</span>
-            <strong>Immutable Strategy</strong>
+            <span>版本策略</span>
+            <strong>不可变策略</strong>
           </div>
           <div className="composer-ledger-cell">
-            <span>binding</span>
-            <strong>1 -&gt; N Backtests + 1 Live</strong>
+            <span>绑定关系</span>
+            <strong>1 策略 → N 回测 + 1 实时</strong>
           </div>
         </div>
       ) : null}
       <div className="section-head">
         <div>
-          <p className="section-eyebrow">Strategy Skill Entry</p>
+          <p className="section-eyebrow">创建策略</p>
           <h2>{title}</h2>
         </div>
         <p className="section-note">{description}</p>
@@ -117,16 +114,16 @@ export default function StrategyComposer({
         </label>
         <div className="composer-telemetry">
           <div className="composer-telemetry-item">
-            <span>title</span>
-            <strong>{normalizedTitle || 'AUTO TITLE'}</strong>
+            <span>标题</span>
+            <strong>{normalizedTitle || '自动生成'}</strong>
           </div>
           <div className="composer-telemetry-item">
-            <span>skill size</span>
+            <span>字数</span>
             <strong>{normalizedSkillLength}</strong>
           </div>
           <div className="composer-telemetry-item">
-            <span>status</span>
-            <strong>{submitting ? 'SUBMITTING' : canSubmit ? 'READY' : 'WAITING'}</strong>
+            <span>状态</span>
+            <strong>{submitting ? '提交中' : canSubmit ? '就绪' : '等待输入'}</strong>
           </div>
         </div>
         <div className="composer-footer">
@@ -136,8 +133,6 @@ export default function StrategyComposer({
           </button>
         </div>
       </form>
-      {error ? <div className="feedback-banner is-error">创建失败：{error}</div> : null}
-      {success ? <div className="feedback-banner is-success">{success}</div> : null}
     </section>
   );
 }

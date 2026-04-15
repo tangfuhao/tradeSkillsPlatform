@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
+import ConfirmDialog from '../components/ConfirmDialog';
 import LifecycleActions from '../components/LifecycleActions';
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
 import ReplayChart from '../components/ReplayChart';
 import { controlBacktest, deleteBacktest, getBacktest, getBacktestPortfolio, getSkill, listBacktestTraces, listMarketCandles } from '../api';
@@ -26,6 +29,14 @@ function progressWidth(run: BacktestRun | null): string {
   return `${Math.round((run.progress?.percent ?? 0) * 100)}%`;
 }
 
+type ConfirmState = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  tone: 'danger' | 'warning';
+  onConfirm: () => void;
+} | null;
+
 export default function ReplayPage() {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
@@ -39,6 +50,7 @@ export default function ReplayPage() {
   const [candlesLoading, setCandlesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
 
   const load = useCallback(async () => {
     if (!runId) return;
@@ -131,38 +143,62 @@ export default function ReplayPage() {
   const finalEquity =
     typeof run?.summary?.final_equity === 'number' ? Number(run.summary.final_equity) : portfolio?.account?.equity ?? null;
 
-  async function handleAction(action: ExecutionAction) {
+  async function executeAction(action: ExecutionAction) {
     if (!run) return;
-    if (action === 'delete') {
-      const confirmed = window.confirm(`删除回测 ${run.id}？\n\n这会同时删除回测时间线、组合状态和执行明细。`);
-      if (!confirmed) return;
-    }
-    if (action === 'stop') {
-      const confirmed = window.confirm(`停止回测 ${run.id}？\n\n系统会在安全检查点结束本次回测。`);
-      if (!confirmed) return;
-    }
-
     setPendingAction(action);
     try {
       if (action === 'delete') {
         await deleteBacktest(run.id);
+        toast.success('回测已删除');
         navigate('/replays');
         return;
       }
       await controlBacktest(run.id, action);
+      toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingAction(null);
     }
+  }
+
+  function handleAction(action: ExecutionAction) {
+    if (!run) return;
+    if (action === 'delete') {
+      setConfirm({
+        title: '删除回测',
+        description: '删除后将清除回测时间线、组合状态和执行明细，且无法恢复。',
+        confirmLabel: '确认删除',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeAction(action);
+        },
+      });
+      return;
+    }
+    if (action === 'stop') {
+      setConfirm({
+        title: '停止回测',
+        description: '系统会在安全检查点结束本次回测，已完成的进度会保留。',
+        confirmLabel: '确认停止',
+        tone: 'warning',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeAction(action);
+        },
+      });
+      return;
+    }
+    void executeAction(action);
   }
 
   const stats = [
     {
       label: '回测进度',
       value: run ? getProgressLabel(run) : '--',
-      detail: run ? describeStatus(run.status) : '等待 run 数据',
+      detail: run ? describeStatus(run.status) : '等待数据',
     },
     {
       label: '收益率',
@@ -177,30 +213,33 @@ export default function ReplayPage() {
     {
       label: '追踪标的',
       value: formatCount(symbolSlices.length),
-      detail: selectedSlice ? `当前聚焦 ${selectedSlice.symbol}` : '等待策略开始产生标的上下文',
+      detail: selectedSlice ? `当前聚焦 ${selectedSlice.symbol}` : '等待产生标的',
     },
   ];
 
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Backtest Detail</p>
-          <h1>{skill?.title ?? run?.id ?? runId ?? '回测详情'}</h1>
-          <p className="hero-copy">
-            当前详情页只服务这一条回测：状态、进度、策略关联、图表、组合结果和决策时间线都围绕当前 run 展开。
-          </p>
-        </div>
-        <div className="hero-meta">
-          <span className={`status-pill is-${toneForStatus(run?.status)}`}>{describeStatus(run?.status)}</span>
-          <span className="info-pill">{run ? formatWindow(run.start_time_ms, run.end_time_ms) : '--'}</span>
-          {skill ? (
-            <Link className="action-button" to={`/strategies/${skill.id}`}>
-              打开策略档案
-            </Link>
-          ) : null}
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="回测详情"
+        title={skill?.title ?? run?.id ?? runId ?? '回测详情'}
+        description={run ? `时间窗口 ${formatWindow(run.start_time_ms, run.end_time_ms)}` : undefined}
+        backTo="/replays"
+        backLabel="回测列表"
+        status={
+          <>
+            <span className={`status-pill is-${toneForStatus(run?.status)}`}>{describeStatus(run?.status)}</span>
+            {skill && <Link className="text-link" to={`/strategies/${skill.id}`}>策略档案</Link>}
+          </>
+        }
+        actions={
+          <LifecycleActions
+            actions={run?.available_actions ?? []}
+            disabled={!run || Boolean(pendingAction)}
+            onAction={(action) => handleAction(action)}
+            pendingAction={pendingAction}
+          />
+        }
+      />
 
       <section className="metric-grid">
         {stats.map((stat) => (
@@ -208,24 +247,13 @@ export default function ReplayPage() {
         ))}
       </section>
 
-      {error ? <div className="feedback-banner is-error">回测详情加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="surface">
         <div className="section-head">
           <div>
-            <p className="section-eyebrow">Run Control</p>
-            <h2>当前回测控制</h2>
-          </div>
-          <div className="action-cluster">
-            <Link className="action-button" to="/replays">
-              返回回测列表
-            </Link>
-            <LifecycleActions
-              actions={run?.available_actions ?? []}
-              disabled={!run || Boolean(pendingAction)}
-              onAction={(action) => void handleAction(action)}
-              pendingAction={pendingAction}
-            />
+            <p className="section-eyebrow">回测控制</p>
+            <h2>运行状态</h2>
           </div>
         </div>
         <div className="spec-sheet">
@@ -256,23 +284,22 @@ export default function ReplayPage() {
             <div className="spec-side">
               <span className="spec-side-label">关联策略</span>
               <strong>{skill?.title ?? run?.skill_id ?? '--'}</strong>
-              <p>{skill ? '回测详情只追踪当前 run 与其所属策略。' : '策略档案读取中。'}</p>
             </div>
           </article>
-          <article className="spec-row">
-            <div className="spec-term-block">
-              <span className="spec-term">异常信息</span>
-            </div>
-            <div className="spec-main">
-              <strong>{run?.error_message ?? '无'}</strong>
-              <p>失败或中断时，这里保留错误文本，便于定位。</p>
-            </div>
-            <div className="spec-side">
-              <span className="spec-side-label">最近活动</span>
-              <strong>{formatTime(run?.last_activity_at_ms ?? run?.updated_at_ms)}</strong>
-              <p>更新时间与最后处理触发点会一起计入。</p>
-            </div>
-          </article>
+          {run?.error_message && (
+            <article className="spec-row">
+              <div className="spec-term-block">
+                <span className="spec-term">异常信息</span>
+              </div>
+              <div className="spec-main">
+                <strong>{run.error_message}</strong>
+              </div>
+              <div className="spec-side">
+                <span className="spec-side-label">最近活动</span>
+                <strong>{formatTime(run.last_activity_at_ms ?? run.updated_at_ms)}</strong>
+              </div>
+            </article>
+          )}
         </div>
       </section>
 
@@ -280,10 +307,9 @@ export default function ReplayPage() {
         <section className="surface">
           <div className="section-head">
             <div>
-              <p className="section-eyebrow">Chart Region</p>
+              <p className="section-eyebrow">图表区域</p>
               <h2>{selectedSlice?.symbol ?? '等待标的'}</h2>
             </div>
-            <span className="section-note">成交标记与 K 线在同一画布内查看。</span>
           </div>
           <div className="symbol-tabs">
             {symbolSlices.length ? (
@@ -296,51 +322,47 @@ export default function ReplayPage() {
                 >
                   <strong>{slice.symbol}</strong>
                   <span>
-                    {slice.tradeCount} fills / {slice.triggerCount} steps
+                    {slice.tradeCount} 成交 / {slice.triggerCount} 步
                   </span>
                 </button>
               ))
             ) : (
               <div className="empty-state compact-empty">
-                <strong>{loading ? '正在提取标的切片...' : '这条回测还没有形成标的切片'}</strong>
-                <p>一旦 run 产生更多交易动作，这里会自动切换成可按 symbol 浏览的图表工作区。</p>
+                <strong>{loading ? '正在提取标的切片...' : '还没有形成标的切片'}</strong>
+                <p>回测产生交易动作后将自动展示图表。</p>
               </div>
             )}
           </div>
           <ReplayChart candles={candles} fills={selectedSlice?.fills ?? []} loading={candlesLoading} symbol={selectedSlice?.symbol} />
-          <div className="spec-sheet">
-            <article className="spec-row is-emphasis">
-              <div className="spec-term-block">
-                <span className="spec-term">价格区间</span>
-              </div>
-              <div className="spec-main">
-                <strong>
-                  {candles.length
-                    ? `${candleSummary.low?.toFixed(4)} - ${candleSummary.high?.toFixed(4)}`
-                    : candlesLoading
-                      ? '同步中'
-                      : '--'}
-                </strong>
-                <p>
-                  {candles.length
-                    ? `收盘 ${candleSummary.firstClose?.toFixed(4)} → ${candleSummary.lastClose?.toFixed(4)}`
-                    : '等待 K 线样本。'}
-                </p>
-              </div>
-              <div className="spec-side">
-                <span className="spec-side-label">当前标的动作</span>
-                <strong>{selectedSlice ? formatCount(selectedSlice.tradeCount) : '--'}</strong>
-                <p>{selectedSlice ? `首次触发 ${formatTime(selectedSlice.firstTriggerMs)}` : '等待选择标的。'}</p>
-              </div>
-            </article>
-          </div>
+          {candles.length > 0 && (
+            <div className="spec-sheet">
+              <article className="spec-row is-emphasis">
+                <div className="spec-term-block">
+                  <span className="spec-term">价格区间</span>
+                </div>
+                <div className="spec-main">
+                  <strong>
+                    {candleSummary.low?.toFixed(4)} - {candleSummary.high?.toFixed(4)}
+                  </strong>
+                  <p>
+                    收盘 {candleSummary.firstClose?.toFixed(4)} → {candleSummary.lastClose?.toFixed(4)}
+                  </p>
+                </div>
+                <div className="spec-side">
+                  <span className="spec-side-label">当前标的动作</span>
+                  <strong>{selectedSlice ? formatCount(selectedSlice.tradeCount) : '--'}</strong>
+                  <p>{selectedSlice ? `首次触发 ${formatTime(selectedSlice.firstTriggerMs)}` : ''}</p>
+                </div>
+              </article>
+            </div>
+          )}
         </section>
 
         <section className="surface">
           <div className="section-head">
             <div>
-              <p className="section-eyebrow">Run Dossier</p>
-              <h2>当前回测摘要</h2>
+              <p className="section-eyebrow">回测摘要</p>
+              <h2>组合概览</h2>
             </div>
           </div>
           <div className="spec-sheet">
@@ -350,7 +372,7 @@ export default function ReplayPage() {
               </div>
               <div className="spec-main">
                 <strong>{skill?.title ?? run?.skill_id ?? '--'}</strong>
-                <p>{skill ? `节奏 ${getSkillCadence(skill)}` : '读取策略档案中'}</p>
+                <p>{skill ? `节奏 ${getSkillCadence(skill)}` : '读取中'}</p>
               </div>
               <div className="spec-side">
                 <span className="spec-side-label">最终权益</span>
@@ -364,19 +386,17 @@ export default function ReplayPage() {
               </div>
               <div className="spec-main">
                 <strong>{formatCount(portfolio?.positions?.length ?? 0)}</strong>
-                <p>组合快照来自当前回测作用域。</p>
               </div>
               <div className="spec-side">
                 <span className="spec-side-label">最近活动</span>
                 <strong>{formatTime(run?.last_activity_at_ms ?? run?.updated_at_ms)}</strong>
-                <p>更新时间与最后处理触发点会一起计入。</p>
               </div>
             </article>
           </div>
 
-          <div className="section-head">
+          <div className="section-head" style={{ marginTop: 16 }}>
             <div>
-              <p className="section-eyebrow">Decision Timeline</p>
+              <p className="section-eyebrow">决策时间线</p>
               <h2>当前标的时间线</h2>
             </div>
           </div>
@@ -396,7 +416,7 @@ export default function ReplayPage() {
                       ) : null}
                     </div>
                   </div>
-                  <p className="timeline-copy">{trace.reasoning_summary || '当前步骤未返回额外推理摘要。'}</p>
+                  <p className="timeline-copy">{trace.reasoning_summary || '当前步骤未返回推理摘要。'}</p>
                   {trace.fills.length ? (
                     <div className="meta-row">
                       {trace.fills.map((fill) => (
@@ -411,12 +431,22 @@ export default function ReplayPage() {
             </div>
           ) : (
             <div className="empty-state compact-empty">
-              <strong>{loading ? '正在读取决策轨迹...' : '当前标的还没有可展示的决策时间线'}</strong>
-              <p>选择其他 symbol，或者等待回测继续推进。</p>
+              <strong>{loading ? '正在读取决策轨迹...' : '还没有可展示的决策时间线'}</strong>
+              <p>选择其他标的，或等待回测继续推进。</p>
             </div>
           )}
         </section>
       </section>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        onOpenChange={(open) => { if (!open) setConfirm(null); }}
+        title={confirm?.title ?? ''}
+        description={confirm?.description ?? ''}
+        confirmLabel={confirm?.confirmLabel ?? '确认'}
+        tone={confirm?.tone ?? 'danger'}
+        onConfirm={confirm?.onConfirm ?? (() => {})}
+      />
     </div>
   );
 }

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
+import LoadingSkeleton from '../components/LoadingSkeleton';
 import { getLiveTaskPortfolio, getSkill, listBacktests, listLiveTasks, listSignals } from '../api';
 import {
   describeStatus,
@@ -102,10 +104,10 @@ export default function StrategyProfilePage() {
     {
       term: '触发节奏',
       value: skill ? getSkillCadence(skill) : '--',
-      detail: skill ? describeTriggerMode(skill.envelope.trigger?.trigger_on) : '正在读取策略触发方式',
+      detail: skill ? describeTriggerMode(skill.envelope.trigger?.trigger_on) : '读取中',
       sideLabel: '运行模式',
       sideValue: runtimeModes.length ? runtimeModes.join(' / ') : '未声明',
-      sideDetail: '策略定义只读；若要修改请创建新策略版本。',
+      sideDetail: '策略定义只读，修改请创建新版本。',
     },
     {
       term: '风险约束',
@@ -118,18 +120,18 @@ export default function StrategyProfilePage() {
     {
       term: '必需工具',
       value: toolContract?.required_tools?.length ? toolContract.required_tools.join(', ') : '未声明',
-      detail: '用于判断实时或回测时所依赖的能力边界。',
+      detail: '判断执行时所依赖的能力边界。',
       sideLabel: '可选工具',
       sideValue: toolContract?.optional_tools?.length ? toolContract.optional_tools.join(', ') : '未声明',
-      sideDetail: '未声明时表示当前版本没有额外可选工具约束。',
+      sideDetail: '未声明时无额外可选工具约束。',
     },
     {
       term: '提取方式',
       value: skill?.extraction_method === 'llm_fallback' ? 'LLM 回退' : '规则提取',
-      detail: extractionMeta?.reasoning_summary ?? '当前版本没有额外抽取摘要。',
+      detail: extractionMeta?.reasoning_summary ?? '无额外抽取摘要。',
       sideLabel: '校验警告',
       sideValue: skill?.validation_warnings.length ? skill.validation_warnings.join('；') : '无',
-      sideDetail: '策略会带着这些说明进入执行与展示流程。',
+      sideDetail: '策略带着这些说明进入执行流程。',
     },
   ];
 
@@ -152,14 +154,14 @@ export default function StrategyProfilePage() {
       detail: latestReturn == null ? '等待首条回测' : `收益 ${formatSignedPercent(latestReturn)}`,
       sideLabel: '最近标的',
       sideValue: insight?.recentSymbols.length ? insight.recentSymbols.join(' / ') : '暂无',
-      sideDetail: '用于帮助快速判断策略当前覆盖的市场。',
+      sideDetail: '策略当前覆盖的市场。',
     },
   ];
 
   if (!loading && !skill) {
     return (
       <div className="page-stack">
-        {error ? <div className="feedback-banner is-error">策略档案加载失败：{error}</div> : null}
+        {error ? <div className="feedback-banner is-error">{error}</div> : null}
         <section className="surface">
           <div className="empty-state">
             <strong>没有找到这条策略</strong>
@@ -175,35 +177,38 @@ export default function StrategyProfilePage() {
 
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Read-only Profile</p>
-          <h1>{skill?.title ?? skillId ?? '策略档案'}</h1>
-          <p className="hero-copy">{skill ? getStrategyExcerpt(skill) : '正在读取策略档案...'}</p>
-        </div>
-        <div className="hero-meta">
-          <span className={`status-pill is-${toneForStatus(skill?.validation_status)}`}>{describeStatus(skill?.validation_status)}</span>
-          <span className="info-pill">Immutable Strategy</span>
-          <Link className="action-button" to="/strategies">
-            返回管理页
-          </Link>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="策略档案"
+        title={skill?.title ?? skillId ?? '策略详情'}
+        description={skill ? getStrategyExcerpt(skill) : '正在读取...'}
+        backTo="/strategies"
+        backLabel="策略列表"
+        status={
+          <>
+            <span className={`status-pill is-${toneForStatus(skill?.validation_status)}`}>{describeStatus(skill?.validation_status)}</span>
+            <span className="info-pill">不可变版本</span>
+          </>
+        }
+      />
 
-      <section className="metric-grid">
-        {stats.map((stat) => (
-          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
-        ))}
-      </section>
+      {loading ? (
+        <LoadingSkeleton variant="stat" />
+      ) : (
+        <section className="metric-grid">
+          {stats.map((stat) => (
+            <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </section>
+      )}
 
-      {error ? <div className="feedback-banner is-error">策略关联数据存在部分加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="dual-grid">
         <section className="surface">
           <div className="section-head">
             <div>
-              <p className="section-eyebrow">Strategy Contract</p>
-              <h2>策略定义</h2>
+              <p className="section-eyebrow">策略定义</p>
+              <h2>合约详情</h2>
             </div>
           </div>
           <div className="spec-sheet">
@@ -229,8 +234,8 @@ export default function StrategyProfilePage() {
         <section className="surface">
           <div className="section-head">
             <div>
-              <p className="section-eyebrow">Linked Execution</p>
-              <h2>关联执行</h2>
+              <p className="section-eyebrow">关联执行</p>
+              <h2>执行概览</h2>
             </div>
           </div>
           <div className="spec-sheet">
@@ -252,7 +257,7 @@ export default function StrategyProfilePage() {
             ))}
           </div>
 
-          <div className="action-cluster">
+          <div className="action-cluster" style={{ marginTop: 16 }}>
             {insight?.latestBacktest ? (
               <Link className="action-button" to={`/replays/${insight.latestBacktest.id}`}>
                 打开最近回测

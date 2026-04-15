@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import AutoRefreshDot from '../components/AutoRefreshDot';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
-import StrategyComposer from '../components/StrategyComposer';
 import { getLiveTaskPortfolio, getMarketOverview, listBacktests, listLiveTasks, listSignals, listSkills } from '../api';
 import {
   describeStatus,
@@ -40,6 +42,8 @@ export default function ProductHomePage() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const lastRefreshRef = useRef<number | null>(null);
+  const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -64,6 +68,9 @@ export default function ProductHomePage() {
         overview,
       });
       setError(null);
+      const now = Date.now();
+      lastRefreshRef.current = now;
+      setLastRefreshMs(now);
 
       return { signals };
     } catch (nextError) {
@@ -138,37 +145,36 @@ export default function ProductHomePage() {
 
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Operations Overview</p>
-          <h1>把首页收紧成真正的策略工作台。</h1>
-          <p className="hero-copy">
-            首页只保留四块最高频信息：当前实时模拟、最近回测、最近策略、以及新的策略 Skill 入口。
-          </p>
-        </div>
-        <div className="hero-meta">
-          <span className="info-pill">策略关联：1 条策略 → 多个回测 + 最多 1 个实时运行</span>
-          <span className="info-pill">策略创建后不可编辑</span>
-          <Link className="action-button is-primary" to="/strategies">
-            进入策略管理
-          </Link>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="运营总览"
+        title="策略运营台"
+        description="实时模拟运行状态、最近回测、策略库存一览。"
+        actions={
+          <>
+            <AutoRefreshDot lastRefreshMs={lastRefreshMs} />
+            <Link className="text-link" to="/strategies">策略管理</Link>
+          </>
+        }
+      />
 
-      <section className="metric-grid">
-        {stats.map((stat) => (
-          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
-        ))}
-      </section>
+      {loading && !data.skills.length ? (
+        <LoadingSkeleton variant="stat" />
+      ) : (
+        <section className="metric-grid">
+          {stats.map((stat) => (
+            <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </section>
+      )}
 
-      {error ? <div className="feedback-banner is-error">首页加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="dashboard-grid">
         <div className="dashboard-main">
           <section className="surface emphasis-surface">
             <div className="section-head">
               <div>
-                <p className="section-eyebrow">Live Runtime</p>
+                <p className="section-eyebrow">实时运行</p>
                 <h2>当前实时策略模拟</h2>
               </div>
               <Link className="text-link" to="/signals">
@@ -179,7 +185,10 @@ export default function ProductHomePage() {
               <div className="live-highlight">
                 <div className="live-highlight-header">
                   <div>
-                    <p className="record-title">{activeLiveInsight.skill.title}</p>
+                    <p className="record-title">
+                      <span className={`status-dot is-${toneForStatus(liveTask.status)}`} />
+                      {activeLiveInsight.skill.title}
+                    </p>
                     <div className="meta-row">
                       <span className={`status-pill is-${toneForStatus(liveTask.status)}`}>{describeStatus(liveTask.status)}</span>
                       <span className="info-pill">节奏 {liveTask.cadence}</span>
@@ -217,7 +226,7 @@ export default function ProductHomePage() {
             ) : (
               <div className="empty-state">
                 <strong>{loading ? '正在扫描实时任务...' : '当前没有正在运行的实时策略'}</strong>
-                <p>去策略页启动一条实时模拟后，这里会显示运行时长、收益、最近活动与策略入口。</p>
+                <p>去策略页启动一条实时模拟后，这里会显示运行时长、收益和最近活动。</p>
               </div>
             )}
           </section>
@@ -225,14 +234,16 @@ export default function ProductHomePage() {
           <section className="surface">
             <div className="section-head">
               <div>
-                <p className="section-eyebrow">Recent Backtests</p>
-                <h2>最近回测</h2>
+                <p className="section-eyebrow">最近回测</p>
+                <h2>回测记录</h2>
               </div>
               <Link className="text-link" to="/replays">
                 查看全部
               </Link>
             </div>
-            {recentBacktests.length ? (
+            {loading && !recentBacktests.length ? (
+              <LoadingSkeleton rows={3} />
+            ) : recentBacktests.length ? (
               <>
                 <div className="table-head compact-ledger-head">
                   <span>策略 / 回测</span>
@@ -270,7 +281,7 @@ export default function ProductHomePage() {
             ) : (
               <div className="empty-state compact-empty">
                 <strong>还没有回测记录</strong>
-                <p>策略页支持按历史覆盖范围配置回测窗口，完成后会立即回到这里。</p>
+                <p>在策略页配置回测窗口后，记录将自动出现在这里。</p>
               </div>
             )}
           </section>
@@ -280,14 +291,16 @@ export default function ProductHomePage() {
           <section className="surface">
             <div className="section-head">
               <div>
-                <p className="section-eyebrow">Recent Strategies</p>
-                <h2>最近策略</h2>
+                <p className="section-eyebrow">最近策略</p>
+                <h2>策略列表</h2>
               </div>
               <Link className="text-link" to="/strategies">
-                策略列表
+                全部策略
               </Link>
             </div>
-            {recentStrategies.length ? (
+            {loading && !recentStrategies.length ? (
+              <LoadingSkeleton rows={3} />
+            ) : recentStrategies.length ? (
               <>
                 <div className="table-head compact-ledger-head compact-ledger-head-two">
                   <span>策略</span>
@@ -297,7 +310,10 @@ export default function ProductHomePage() {
                   {recentStrategies.map((insight) => (
                   <Link className="mini-record" key={insight.skill.id} to={`/strategies/${insight.skill.id}`}>
                     <div className="mini-record-head">
-                      <strong>{insight.skill.title}</strong>
+                      <strong>
+                        <span className={`status-dot is-${toneForStatus(insight.skill.validation_status)}`} />
+                        {insight.skill.title}
+                      </strong>
                       <span className={`status-pill is-${toneForStatus(insight.skill.validation_status)}`}>
                         {describeStatus(insight.skill.validation_status)}
                       </span>
@@ -316,21 +332,10 @@ export default function ProductHomePage() {
             ) : (
               <div className="empty-state compact-empty">
                 <strong>还没有策略库存</strong>
-                <p>直接在右侧粘贴 Skill，即可创建新的不可编辑策略版本。</p>
+                <p>点击顶部「新建策略」按钮创建第一条策略。</p>
               </div>
             )}
           </section>
-
-          <StrategyComposer
-            description="直接在产品首页录入策略 Skill；创建成功后会自动进入策略工作台。"
-            onCreated={() => {
-              setLoading(true);
-              void load().then((result) => setSignals(result.signals));
-            }}
-            submitLabel="立即创建策略"
-            title="直接输入策略 Skill"
-            variant="desk"
-          />
         </div>
       </section>
     </div>

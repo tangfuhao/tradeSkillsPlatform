@@ -1,9 +1,13 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 
+import AutoRefreshDot from '../components/AutoRefreshDot';
+import ConfirmDialog from '../components/ConfirmDialog';
 import LifecycleActions from '../components/LifecycleActions';
+import LoadingSkeleton from '../components/LoadingSkeleton';
+import PageHeader from '../components/PageHeader';
 import ProductStatTile from '../components/ProductStatTile';
-import StrategyComposer from '../components/StrategyComposer';
 import {
   controlBacktest,
   controlLiveTask,
@@ -46,6 +50,14 @@ type StrategiesData = {
   overview: MarketOverview | null;
 };
 
+type ConfirmState = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  tone: 'danger' | 'warning';
+  onConfirm: () => void;
+} | null;
+
 export default function StrategiesPage() {
   const [data, setData] = useState<StrategiesData>({
     skills: [],
@@ -62,6 +74,9 @@ export default function StrategiesPage() {
   const [launcherStart, setLauncherStart] = useState('');
   const [launcherEnd, setLauncherEnd] = useState('');
   const [launcherInitialCapital, setLauncherInitialCapital] = useState(DEFAULT_BACKTEST_INITIAL_CAPITAL);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
+  const lastRefreshRef = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -87,6 +102,9 @@ export default function StrategiesPage() {
       setSignals(signalsResult);
       setBacktests(backtestsResult);
       setError(null);
+      const now = Date.now();
+      lastRefreshRef.current = now;
+      setLastRefreshMs(now);
     } catch (nextError) {
       setError(getErrorMessage(nextError));
     } finally {
@@ -135,7 +153,7 @@ export default function StrategiesPage() {
       {
         label: '回测配置',
         value: defaultBacktestWindow ? '可自定义' : '--',
-        detail: defaultBacktestWindow ? '默认预填最近 24 小时，并受历史覆盖范围约束' : '等待市场数据覆盖窗口',
+        detail: defaultBacktestWindow ? '默认预填最近 24 小时' : '等待市场数据覆盖窗口',
       },
     ],
     [backtests, defaultBacktestWindow, insights],
@@ -144,7 +162,7 @@ export default function StrategiesPage() {
   const resetLauncherToDefaultWindow = useCallback(() => {
     const nextWindow = getDefaultBacktestWindow(data.overview);
     if (!nextWindow) {
-      setError('当前没有足够的历史行情覆盖范围，无法配置回测。');
+      toast.error('当前没有足够的历史行情覆盖范围，无法配置回测。');
       return false;
     }
     setLauncherStart(nextWindow.start);
@@ -163,38 +181,50 @@ export default function StrategiesPage() {
     [resetLauncherToDefaultWindow],
   );
 
-  async function handleStrategyAction(skill: Skill, action: ExecutionAction) {
+  async function executeStrategyAction(skill: Skill, action: ExecutionAction) {
     const key = `${skill.id}:${action}`;
-    if (action === 'delete') {
-      const confirmed = window.confirm(
-        `删除策略 ${skill.title}？\n\n这会级联删除该策略关联的所有回测、实时运行、信号和组合状态。`,
-      );
-      if (!confirmed) return;
-    }
-    if (action === 'create_backtest') {
-      openBacktestLauncher(skill);
-      return;
-    }
-
     setPendingKey(key);
     try {
       if (action === 'create_live_task') {
         await createLiveTask({ skill_id: skill.id });
+        toast.success(`实时任务已启动：${skill.title}`);
       } else if (action === 'delete') {
         await deleteSkill(skill.id);
+        toast.success(`策略已删除：${skill.title}`);
       }
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
   }
 
+  function handleStrategyAction(skill: Skill, action: ExecutionAction) {
+    if (action === 'create_backtest') {
+      openBacktestLauncher(skill);
+      return;
+    }
+    if (action === 'delete') {
+      setConfirm({
+        title: `删除策略「${skill.title}」`,
+        description: '删除后将级联清除该策略关联的所有回测、实时运行、信号和组合状态，且无法恢复。',
+        confirmLabel: '确认删除',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeStrategyAction(skill, action);
+        },
+      });
+      return;
+    }
+    void executeStrategyAction(skill, action);
+  }
+
   async function handleLaunchBacktest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!launcherSkill) {
-      setError('请先从策略动作中选择要发起回测的策略。');
+      toast.error('请先从策略动作中选择要发起回测的策略。');
       return;
     }
 
@@ -206,12 +236,12 @@ export default function StrategiesPage() {
       cadence: launcherSkill.envelope?.trigger?.value,
     });
     if (nextRequest.error) {
-      setError(nextRequest.error);
+      toast.error(nextRequest.error);
       return;
     }
     const payload = nextRequest.payload;
     if (!payload) {
-      setError('回测请求准备失败，请重新选择时间窗口。');
+      toast.error('回测请求准备失败，请重新选择时间窗口。');
       return;
     }
 
@@ -223,60 +253,98 @@ export default function StrategiesPage() {
         ...payload,
       });
       setLauncherSkillId(null);
-      setError(null);
+      toast.success('回测已启动');
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
   }
 
-  async function handleLiveAction(task: LiveTask, action: ExecutionAction) {
+  async function executeLiveAction(task: LiveTask, action: ExecutionAction) {
     const key = `${task.id}:${action}`;
-    if (action === 'stop') {
-      const confirmed = window.confirm(`停止实时运行 ${task.id}？\n\n这会中断后续触发，但不会删除已有信号。`);
-      if (!confirmed) return;
-    }
     setPendingKey(key);
     try {
       if (action === 'trigger') {
         await triggerLiveTask(task.id);
+        toast.success('触发成功');
       } else {
         await controlLiveTask(task.id, action);
+        toast.success(`实时任务已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
       }
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
   }
 
-  async function handleBacktestAction(run: BacktestRun, action: ExecutionAction) {
-    const key = `${run.id}:${action}`;
-    if (action === 'delete') {
-      const confirmed = window.confirm(`删除回测 ${run.id}？\n\n这会删除该回测的 traces 与组合状态。`);
-      if (!confirmed) return;
-    }
+  function handleLiveAction(task: LiveTask, action: ExecutionAction) {
     if (action === 'stop') {
-      const confirmed = window.confirm(`停止回测 ${run.id}？\n\n系统会在安全检查点结束当前回测。`);
-      if (!confirmed) return;
+      setConfirm({
+        title: `停止实时运行`,
+        description: '停止后将中断后续触发，但不会删除已有信号记录。',
+        confirmLabel: '确认停止',
+        tone: 'warning',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeLiveAction(task, action);
+        },
+      });
+      return;
     }
+    void executeLiveAction(task, action);
+  }
 
+  async function executeBacktestAction(run: BacktestRun, action: ExecutionAction) {
+    const key = `${run.id}:${action}`;
     setPendingKey(key);
     try {
       if (action === 'delete') {
         await deleteBacktest(run.id);
+        toast.success('回测已删除');
       } else {
         await controlBacktest(run.id, action);
+        toast.success(`回测已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
       }
       await load();
     } catch (nextError) {
-      setError(getErrorMessage(nextError));
+      toast.error(getErrorMessage(nextError));
     } finally {
       setPendingKey(null);
     }
+  }
+
+  function handleBacktestAction(run: BacktestRun, action: ExecutionAction) {
+    if (action === 'delete') {
+      setConfirm({
+        title: `删除回测`,
+        description: '删除后将清除该回测的 traces 与组合状态，且无法恢复。',
+        confirmLabel: '确认删除',
+        tone: 'danger',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeBacktestAction(run, action);
+        },
+      });
+      return;
+    }
+    if (action === 'stop') {
+      setConfirm({
+        title: `停止回测`,
+        description: '系统会在安全检查点结束当前回测，已完成的进度会保留。',
+        confirmLabel: '确认停止',
+        tone: 'warning',
+        onConfirm: () => {
+          setConfirm(null);
+          void executeBacktestAction(run, action);
+        },
+      });
+      return;
+    }
+    void executeBacktestAction(run, action);
   }
 
   useEffect(() => {
@@ -288,38 +356,38 @@ export default function StrategiesPage() {
 
   return (
     <div className="page-stack">
-      <section className="hero-panel surface">
-        <div>
-          <p className="section-eyebrow">Strategy Operations</p>
-          <h1>把策略页变成真正的管理面，而不是纯展示目录。</h1>
-          <p className="hero-copy">
-            这里围绕策略本体进行管理：创建不可编辑策略、按历史覆盖配置回测窗口、启动或停止实时运行、以及执行级联删除。
-          </p>
-        </div>
-        <div className="hero-meta">
-          <span className="info-pill">删除策略会同时删除所有回测与实时运行</span>
-          <span className="info-pill">策略本体只读，修改请创建新版本</span>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="策略管理"
+        title="策略工作台"
+        description="创建、管理策略，配置回测窗口，启停实时运行。"
+        actions={<AutoRefreshDot lastRefreshMs={lastRefreshMs} />}
+      />
 
-      <section className="metric-grid">
-        {stats.map((stat) => (
-          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
-        ))}
-      </section>
+      {loading && !insights.length ? (
+        <LoadingSkeleton variant="stat" />
+      ) : (
+        <section className="metric-grid">
+          {stats.map((stat) => (
+            <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+          ))}
+        </section>
+      )}
 
-      {error ? <div className="feedback-banner is-error">策略页加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">{error}</div> : null}
 
       <section className="management-grid">
         <section className="stack-section">
-          {insights.length ? (
+          {loading && !insights.length ? (
+            <section className="surface">
+              <LoadingSkeleton rows={4} />
+            </section>
+          ) : insights.length ? (
             <section className="surface">
               <div className="section-head">
                 <div>
-                  <p className="section-eyebrow">Strategy Ledger</p>
-                  <h2>策略管理台账</h2>
+                  <p className="section-eyebrow">策略台账</p>
+                  <h2>策略管理列表</h2>
                 </div>
-                <span className="section-note">以策略为锚点查看实时运行、回测和可执行动作，不再拆成大量独立卡片。</span>
               </div>
 
               <div className="table-head strategy-ledger-head">
@@ -338,21 +406,24 @@ export default function StrategiesPage() {
                     <article className="record-row strategy-ledger-row" key={insight.skill.id}>
                       <div className="strategy-row-main">
                         <div className="record-cell">
-                          <p className="record-title">{insight.skill.title}</p>
+                          <p className="record-title">
+                            <span className={`status-dot is-${toneForStatus(insight.skill.validation_status)}`} />
+                            {insight.skill.title}
+                          </p>
                           <p className="record-subtitle">{getStrategyExcerpt(insight.skill)}</p>
                         </div>
                         <div className="record-cell">
                           <span className={`status-pill is-${toneForStatus(insight.skill.validation_status)}`}>
                             {describeStatus(insight.skill.validation_status)}
                           </span>
-                          <p className="record-subtitle">节奏 {getSkillCadence(insight.skill)} / Immutable</p>
+                          <p className="record-subtitle">节奏 {getSkillCadence(insight.skill)}</p>
                         </div>
                         <div className="record-cell">
                           <strong>{liveTask ? describeStatus(liveTask.status) : '未启动'}</strong>
                           <p className="record-subtitle">
                             {liveTask
                               ? `收益 ${formatSignedPercent(liveAccount?.total_return_pct)} / 权益 ${formatSignedCurrency(liveAccount?.equity)}`
-                              : '当前没有实时运行实例。'}
+                              : '当前没有实时运行实例'}
                           </p>
                         </div>
                         <div className="record-cell">
@@ -360,7 +431,7 @@ export default function StrategiesPage() {
                           <p className="record-subtitle">
                             {insight.latestBacktest
                               ? `${getProgressLabel(insight.latestBacktest)} / ${formatSignedPercent(getRunReturnPct(insight.latestBacktest))}`
-                              : '还没有回测记录。'}
+                              : '还没有回测记录'}
                           </p>
                         </div>
                         <div className="record-cell">
@@ -368,7 +439,7 @@ export default function StrategiesPage() {
                             {formatCount(insight.backtests.length)} 回测 / {formatCount(insight.signals.length)} 信号
                           </strong>
                           <p className="record-subtitle">
-                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待交易标的上下文'}
+                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待交易标的'}
                           </p>
                         </div>
                       </div>
@@ -376,12 +447,12 @@ export default function StrategiesPage() {
                       <div className="record-footer">
                         <div className="action-cluster">
                           <Link className="action-button" to={`/strategies/${insight.skill.id}`}>
-                            只读档案
+                            策略档案
                           </Link>
                           <LifecycleActions
                             actions={insight.skill.available_actions}
                             disabled={(pendingKey?.startsWith(`${insight.skill.id}:`) ?? false) || loading}
-                            onAction={(action) => void handleStrategyAction(insight.skill, action)}
+                            onAction={(action) => handleStrategyAction(insight.skill, action)}
                             pendingAction={pendingKey?.startsWith(`${insight.skill.id}:`) ? pendingKey.split(':')[1] ?? null : null}
                           />
                         </div>
@@ -393,10 +464,9 @@ export default function StrategiesPage() {
                           <section className="expander-section">
                             <div className="expander-section-head">
                               <div>
-                                <p className="section-eyebrow">Linked Live</p>
-                                <p className="record-title">实时运行</p>
+                                <p className="section-eyebrow">实时运行</p>
+                                <p className="record-title">关联实时任务</p>
                               </div>
-                              <span className="section-note">每条策略最多保留一个实时实例。</span>
                             </div>
                             {liveTask ? (
                               <div className="spec-sheet">
@@ -426,15 +496,15 @@ export default function StrategiesPage() {
                                   </div>
                                   <div className="spec-main">
                                     <strong>{formatCount(liveTask.available_actions.filter((action) => action !== 'delete').length)}</strong>
-                                    <p>可以直接暂停、继续、停止或立即触发当前实时实例。</p>
+                                    <p>可以暂停、继续、停止或立即触发当前实例。</p>
                                   </div>
                                   <div className="spec-side">
-                                    <span className="spec-side-label">actions</span>
+                                    <span className="spec-side-label">动作</span>
                                     <div className="runtime-ledger-actions">
                                       <LifecycleActions
                                         actions={liveTask.available_actions.filter((action) => action !== 'delete')}
                                         disabled={(pendingKey?.startsWith(`${liveTask.id}:`) ?? false) || loading}
-                                        onAction={(action) => void handleLiveAction(liveTask, action)}
+                                        onAction={(action) => handleLiveAction(liveTask, action)}
                                         pendingAction={pendingKey?.startsWith(`${liveTask.id}:`) ? pendingKey.split(':')[1] ?? null : null}
                                       />
                                     </div>
@@ -444,7 +514,7 @@ export default function StrategiesPage() {
                             ) : (
                               <div className="empty-state compact-empty">
                                 <strong>当前没有实时运行实例</strong>
-                                <p>策略级动作里可以直接启动一条新的实时模拟。</p>
+                                <p>从策略动作中启动一条新的实时模拟。</p>
                               </div>
                             )}
                           </section>
@@ -452,10 +522,9 @@ export default function StrategiesPage() {
                           <section className="expander-section">
                             <div className="expander-section-head">
                               <div>
-                                <p className="section-eyebrow">Linked Backtests</p>
+                                <p className="section-eyebrow">关联回测</p>
                                 <p className="record-title">最近回测</p>
                               </div>
-                              <span className="section-note">仅展示最近 3 条关联回测。</span>
                             </div>
                             {insight.backtests.length ? (
                               <>
@@ -493,7 +562,7 @@ export default function StrategiesPage() {
                                             <LifecycleActions
                                               actions={run.available_actions}
                                               disabled={(pendingKey?.startsWith(`${run.id}:`) ?? false) || loading}
-                                              onAction={(action) => void handleBacktestAction(run, action)}
+                                              onAction={(action) => handleBacktestAction(run, action)}
                                               pendingAction={pendingKey?.startsWith(`${run.id}:`) ? pendingKey.split(':')[1] ?? null : null}
                                             />
                                           </div>
@@ -506,7 +575,7 @@ export default function StrategiesPage() {
                             ) : (
                               <div className="empty-state compact-empty">
                                 <strong>还没有回测记录</strong>
-                                <p>可以直接从策略级动作打开回测配置面板，自定义窗口后立即启动。</p>
+                                <p>从策略动作中打开回测配置面板即可启动。</p>
                               </div>
                             )}
                           </section>
@@ -521,7 +590,7 @@ export default function StrategiesPage() {
             <section className="surface">
               <div className="empty-state">
                 <strong>{loading ? '正在读取策略库存...' : '当前还没有策略'}</strong>
-                <p>直接在右侧输入 Skill，即可创建新的策略版本。</p>
+                <p>点击顶部「新建策略」按钮创建第一条策略。</p>
               </div>
             </section>
           )}
@@ -531,8 +600,8 @@ export default function StrategiesPage() {
           <section className="surface strategy-launcher-surface">
             <div className="section-head">
               <div>
-                <p className="section-eyebrow">Backtest Launcher</p>
-                <h2>回测启动器</h2>
+                <p className="section-eyebrow">回测启动器</p>
+                <h2>配置回测</h2>
               </div>
               {launcherSkill ? (
                 <button className="text-link launcher-dismiss" onClick={() => setLauncherSkillId(null)} type="button">
@@ -555,7 +624,7 @@ export default function StrategiesPage() {
                     <span className="section-note">历史覆盖</span>
                     <strong>{formatWindow(data.overview?.coverage_start_ms, data.overview?.coverage_end_ms)}</strong>
                     <p className="record-subtitle">
-                      默认会预填最近 24 小时；你可以在覆盖范围内重新指定开始和结束时间。
+                      默认预填最近 24 小时，可在覆盖范围内自定义。
                     </p>
                   </div>
                 </div>
@@ -596,7 +665,7 @@ export default function StrategiesPage() {
 
                 <div className="launcher-actions">
                   <button className="action-button" onClick={() => resetLauncherToDefaultWindow()} type="button">
-                    恢复最近 24h 默认
+                    恢复默认
                   </button>
                   <button className="action-button is-primary" disabled={launcherPending || loading} type="submit">
                     {launcherPending ? '启动中...' : '启动回测'}
@@ -606,26 +675,27 @@ export default function StrategiesPage() {
             ) : (
               <div className="empty-state compact-empty launcher-empty">
                 <strong>等待选择策略</strong>
-                <p>从任意策略卡片点击“配置回测”，这里会展示该策略的可配置回测窗口。</p>
+                <p>从策略列表点击「配置回测」即可在此处配置并启动。</p>
                 <p className="record-subtitle">
                   {defaultBacktestWindow
                     ? `默认窗口：${formatWindow(defaultBacktestWindow.startTimeMs, defaultBacktestWindow.endTimeMs)}`
-                    : '当前没有足够的历史覆盖范围，暂时无法发起回测。'}
+                    : '等待市场数据覆盖窗口'}
                 </p>
               </div>
             )}
           </section>
-
-          <StrategyComposer
-            description="创建完成后立即进入策略工作台；策略会成为不可编辑的执行锚点。"
-            onCreated={() => {
-              setLoading(true);
-              void load();
-            }}
-            title="新增策略"
-          />
         </div>
       </section>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        onOpenChange={(open) => { if (!open) setConfirm(null); }}
+        title={confirm?.title ?? ''}
+        description={confirm?.description ?? ''}
+        confirmLabel={confirm?.confirmLabel ?? '确认'}
+        tone={confirm?.tone ?? 'danger'}
+        onConfirm={confirm?.onConfirm ?? (() => {})}
+      />
     </div>
   );
 }
