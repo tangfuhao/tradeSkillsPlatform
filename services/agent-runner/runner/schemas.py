@@ -51,6 +51,21 @@ class ExecutionTiming(BaseModel):
     duration_ms: int
 
 
+class ExecutionBreakdown(BaseModel):
+    tool_execution_total_ms: int = 0
+    llm_wait_total_ms: int = 0
+    other_overhead_ms: int = 0
+
+
+class LlmRoundSummary(BaseModel):
+    round_index: int
+    started_at_ms: int
+    completed_at_ms: int
+    llm_round_duration_ms: int
+    tool_call_count: int = 0
+    result_type: Literal["tool_calls", "final_output"]
+
+
 class ToolCallSummary(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -64,6 +79,8 @@ class ExecuteRunResponse(BaseModel):
     tool_calls: list[ToolCallSummary]
     provider: str
     execution_timing: ExecutionTiming | None = None
+    execution_breakdown: ExecutionBreakdown | None = None
+    llm_rounds: list[LlmRoundSummary] = Field(default_factory=list)
 
 
 class SkillEnvelopeExtractResponse(BaseModel):

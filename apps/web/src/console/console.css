@@ -114,6 +114,40 @@
   margin-bottom: 10px;
 }
 
+.trace-round-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.trace-round-row {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.trace-round-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.trace-round-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.trace-round-head span {
+  color: var(--text-secondary);
+}
+
+.trace-round-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .console-list-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -446,7 +480,8 @@
   .trace-summary-strip,
   .meta-strip,
   .trace-meta-grid,
-  .trace-tool-meta-grid {
+  .trace-tool-meta-grid,
+  .trace-round-meta-grid {
     grid-template-columns: 1fr;
   }
 
@@ -464,6 +499,7 @@
   .trace-summary-strip,
   .trace-meta-grid,
   .trace-tool-meta-grid,
+  .trace-round-meta-grid,
   .console-list-grid {
     grid-template-columns: 1fr;
   }
@@ -474,6 +510,7 @@
   .info-head,
   .trace-head,
   .trace-tool-head,
+  .trace-round-head,
   .console-section-head {
     flex-direction: column;
   }

@@ -256,6 +256,8 @@ See `infra/env/agent-runner.env.example`, especially:
 - `AGENT_RUNNER_OPENAI_BASE_URL`
 - `AGENT_RUNNER_OPENAI_MODEL`
 - `AGENT_RUNNER_OPENAI_WIRE_API`
+- `AGENT_RUNNER_OPENAI_REASONING_EFFORT`
+- `AGENT_RUNNER_EXECUTE_REASONING_EFFORT` (leave blank to omit reasoning for run execution while keeping envelope extraction unchanged)
 
 ## Useful commands
 

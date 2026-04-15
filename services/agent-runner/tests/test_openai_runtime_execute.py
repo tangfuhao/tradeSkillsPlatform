@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from runner.schemas import ExecuteRunRequest
+from runner.schemas import ExecuteRunRequest, ExecutionTiming
 from runner.services.openai_runtime import OpenAIToolDecisionEngine, StreamRoundResult
 
 
@@ -34,11 +34,23 @@ class OpenAIRuntimeExecuteTests(unittest.TestCase):
                         "call_id": "call_test_1",
                     }
                 ],
+                execution_timing=ExecutionTiming(
+                    started_at_ms=1704067200000,
+                    completed_at_ms=1704067201200,
+                    duration_ms=1200,
+                ),
+                result_type="tool_calls",
             ),
             StreamRoundResult(
                 output_text='{"decision":{"action":"skip","reason":"No setup."},"reasoning_summary":"Reviewed the scan results."}',
                 output_items=[],
                 function_calls=[],
+                execution_timing=ExecutionTiming(
+                    started_at_ms=1704067201200,
+                    completed_at_ms=1704067202400,
+                    duration_ms=1200,
+                ),
+                result_type="final_output",
             ),
         ]
 
@@ -54,10 +66,16 @@ class OpenAIRuntimeExecuteTests(unittest.TestCase):
         self.assertEqual(result.tool_calls[0].tool_name, "scan_market")
         self.assertIsNotNone(result.tool_calls[0].execution_timing)
         self.assertIsNotNone(result.execution_timing)
+        self.assertIsNotNone(result.execution_breakdown)
+        self.assertEqual(len(result.llm_rounds), 2)
         assert result.tool_calls[0].execution_timing is not None
         assert result.execution_timing is not None
+        assert result.execution_breakdown is not None
         self.assertGreaterEqual(result.tool_calls[0].execution_timing.duration_ms, 0)
         self.assertGreaterEqual(result.execution_timing.duration_ms, 0)
+        self.assertEqual(result.execution_breakdown.llm_wait_total_ms, 2400)
+        self.assertEqual(result.execution_breakdown.tool_execution_total_ms, result.tool_calls[0].execution_timing.duration_ms)
+        self.assertGreaterEqual(result.execution_breakdown.other_overhead_ms, 0)
         self.assertLessEqual(
             result.tool_calls[0].execution_timing.started_at_ms,
             result.tool_calls[0].execution_timing.completed_at_ms,
@@ -72,6 +90,12 @@ class OpenAIRuntimeExecuteTests(unittest.TestCase):
                     output_text="I'm sorry, but I cannot assist with that request.",
                     output_items=[],
                     function_calls=[],
+                    execution_timing=ExecutionTiming(
+                        started_at_ms=1704067200000,
+                        completed_at_ms=1704067200500,
+                        duration_ms=500,
+                    ),
+                    result_type="final_output",
                 ),
             ):
                 result = OpenAIToolDecisionEngine().execute(_request())
@@ -81,8 +105,12 @@ class OpenAIRuntimeExecuteTests(unittest.TestCase):
         self.assertIn("unstructured final response", result.decision.reason)
         self.assertIn("failed closed", result.reasoning_summary)
         self.assertIsNotNone(result.execution_timing)
+        self.assertIsNotNone(result.execution_breakdown)
+        self.assertEqual(len(result.llm_rounds), 1)
         assert result.execution_timing is not None
+        assert result.execution_breakdown is not None
         self.assertGreaterEqual(result.execution_timing.duration_ms, 0)
+        self.assertEqual(result.execution_breakdown.llm_wait_total_ms, 500)
         self.assertLessEqual(result.execution_timing.started_at_ms, result.execution_timing.completed_at_ms)
 
 

@@ -64,6 +64,8 @@ class TraceResponse(BaseModel):
     reasoning_summary: str
     decision: dict[str, Any]
     execution_timing: dict[str, Any] | None = None
+    execution_breakdown: dict[str, Any] | None = None
+    llm_rounds: list[dict[str, Any]] = Field(default_factory=list)
     tool_calls: list[dict[str, Any]]
     portfolio_before: dict[str, Any] | None = None
     portfolio_after: dict[str, Any] | None = None

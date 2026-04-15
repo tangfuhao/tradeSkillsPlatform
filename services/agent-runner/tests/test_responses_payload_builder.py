@@ -7,7 +7,7 @@ from runner.services.responses_payload_builder import build_responses_request_pa
 
 
 class ResponsesPayloadBuilderTests(unittest.TestCase):
-    def test_builder_omits_temperature_for_responses_routes(self) -> None:
+    def test_builder_uses_global_reasoning_for_default_requests(self) -> None:
         original_model = settings.openai_model
         original_novita_base_url = settings.novita_base_url
         try:
@@ -27,6 +27,23 @@ class ResponsesPayloadBuilderTests(unittest.TestCase):
         self.assertNotIn("temperature", payload)
         self.assertEqual(payload["model"], "pa/gpt-5.4")
         self.assertEqual(payload["reasoning"], {"effort": settings.openai_reasoning_effort})
+
+    def test_builder_omits_reasoning_for_execute_requests_when_override_is_blank(self) -> None:
+        original_execute_reasoning_effort = settings.execute_reasoning_effort
+        try:
+            settings.execute_reasoning_effort = ""
+            payload = build_responses_request_payload(
+                model_name="pa/gpt-5.4",
+                conversation_items=[{"type": "message", "role": "user", "content": []}],
+                system_prompt="system",
+                tools=[],
+                stream=True,
+                request_kind="execute",
+            )
+        finally:
+            settings.execute_reasoning_effort = original_execute_reasoning_effort
+
+        self.assertNotIn("reasoning", payload)
 
     def test_builder_normalizes_prefixed_model_for_compat_route(self) -> None:
         original_novita_base_url = settings.novita_base_url

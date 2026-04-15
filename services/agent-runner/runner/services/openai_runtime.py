@@ -12,7 +12,16 @@ from typing import Any
 from openai import OpenAI
 
 from runner.config import settings
-from runner.schemas import AgentDecision, ExecuteRunRequest, ExecuteRunResponse, ExecutionTiming, RiskTarget, ToolCallSummary
+from runner.schemas import (
+    AgentDecision,
+    ExecuteRunRequest,
+    ExecuteRunResponse,
+    ExecutionBreakdown,
+    ExecutionTiming,
+    LlmRoundSummary,
+    RiskTarget,
+    ToolCallSummary,
+)
 from runner.services.model_routing import get_responses_client
 from runner.services.responses_payload_builder import build_responses_request_payload
 from runner.services.tool_gateway_client import ToolGatewayClient
@@ -27,6 +36,8 @@ class StreamRoundResult:
     output_text: str
     output_items: list[dict[str, Any]]
     function_calls: list[dict[str, Any]]
+    execution_timing: ExecutionTiming
+    result_type: str
 
 
 @dataclass(slots=True)
@@ -44,10 +55,16 @@ class OpenAIToolDecisionEngine:
         runtime = ToolRuntime(payload)
         conversation_items = _build_prompt_input_items(payload)
         tool_summaries: list[ToolCallSummary] = []
+        llm_rounds: list[LlmRoundSummary] = []
         client = get_responses_client(settings.openai_model)
 
         for _ in range(settings.openai_max_tool_rounds):
-            round_result = _stream_response_round(client, conversation_items=conversation_items)
+            round_result = _stream_response_round(
+                client,
+                conversation_items=conversation_items,
+                request_kind="execute",
+            )
+            llm_rounds.append(_build_llm_round_summary(len(llm_rounds) + 1, round_result))
             if round_result.function_calls:
                 function_outputs: list[dict[str, Any]] = []
                 for call in round_result.function_calls:
@@ -84,16 +101,20 @@ class OpenAIToolDecisionEngine:
                     raw_output=round_result.output_text,
                     provider=self.provider,
                     execution_timing=_finish_timing(run_timing),
+                    llm_rounds=llm_rounds,
                 )
             decision_payload = final_payload.get("decision", final_payload)
             reasoning_summary = final_payload.get("reasoning_summary") or _default_reasoning_summary(tool_summaries)
             decision = _sanitize_decision(payload, runtime, decision_payload)
+            execution_timing = _finish_timing(run_timing)
             return ExecuteRunResponse(
                 decision=decision,
                 reasoning_summary=reasoning_summary,
                 tool_calls=tool_summaries,
                 provider=self.provider,
-                execution_timing=_finish_timing(run_timing),
+                execution_timing=execution_timing,
+                execution_breakdown=_build_execution_breakdown(execution_timing, tool_summaries, llm_rounds),
+                llm_rounds=llm_rounds,
             )
 
         raise RuntimeError("LLM tool loop exceeded the configured maximum number of rounds.")
@@ -598,6 +619,7 @@ def _stream_response_round(
     conversation_items: list[dict[str, Any]],
     system_prompt: str | None = None,
     tools: list[dict[str, Any]] | None = None,
+    request_kind: str = "default",
 ) -> StreamRoundResult:
     if settings.openai_wire_api != "responses":
         raise RuntimeError(f"Unsupported wire API: {settings.openai_wire_api}")
@@ -608,6 +630,7 @@ def _stream_response_round(
         system_prompt=_system_prompt() if system_prompt is None else system_prompt,
         tools=_tool_definitions() if tools is None else tools,
         stream=True,
+        request_kind=request_kind,
     )
 
     output_text_parts: list[str] = []
@@ -615,6 +638,7 @@ def _stream_response_round(
     function_calls_by_item_id: dict[str, dict[str, Any]] = {}
     message_text_keys: set[str] = set()
     finalized_output_item_ids: set[str] = set()
+    round_timing = _start_timing()
 
     with client.responses.with_streaming_response.create(**request_payload) as response:
         for line in response.iter_lines():
@@ -718,10 +742,13 @@ def _stream_response_round(
     function_calls = [item for item in output_items if item.get("type") == "function_call"]
     output_text = "".join(output_text_parts).strip()
     if function_calls or output_text:
+        result_type = "tool_calls" if function_calls else "final_output"
         return StreamRoundResult(
             output_text=output_text,
             output_items=output_items,
             function_calls=function_calls,
+            execution_timing=_finish_timing(round_timing),
+            result_type=result_type,
         )
     raise RuntimeError("Responses API stream ended without assistant text or function calls.")
 
@@ -773,6 +800,7 @@ def _fallback_non_json_response(
     raw_output: str,
     provider: str,
     execution_timing: ExecutionTiming,
+    llm_rounds: list[LlmRoundSummary],
 ) -> ExecuteRunResponse:
     snippet = _compact_model_output(raw_output)
     decision_reason = (
@@ -796,6 +824,8 @@ def _fallback_non_json_response(
         tool_calls=tool_summaries,
         provider=provider,
         execution_timing=execution_timing,
+        execution_breakdown=_build_execution_breakdown(execution_timing, tool_summaries, llm_rounds),
+        llm_rounds=llm_rounds,
     )
 
 
@@ -822,6 +852,39 @@ def _finish_timing(checkpoint: TimingCheckpoint) -> ExecutionTiming:
         started_at_ms=checkpoint.started_at_ms,
         completed_at_ms=max(completed_at_ms, checkpoint.started_at_ms),
         duration_ms=duration_ms,
+    )
+
+
+def _build_llm_round_summary(round_index: int, round_result: StreamRoundResult) -> LlmRoundSummary:
+    return LlmRoundSummary(
+        round_index=round_index,
+        started_at_ms=round_result.execution_timing.started_at_ms,
+        completed_at_ms=round_result.execution_timing.completed_at_ms,
+        llm_round_duration_ms=round_result.execution_timing.duration_ms,
+        tool_call_count=len(round_result.function_calls),
+        result_type=round_result.result_type,
+    )
+
+
+def _build_execution_breakdown(
+    execution_timing: ExecutionTiming,
+    tool_summaries: list[ToolCallSummary],
+    llm_rounds: list[LlmRoundSummary],
+) -> ExecutionBreakdown:
+    tool_execution_total_ms = sum(
+        max(0, int(call.execution_timing.duration_ms))
+        for call in tool_summaries
+        if call.execution_timing is not None
+    )
+    llm_wait_total_ms = sum(max(0, int(round_summary.llm_round_duration_ms)) for round_summary in llm_rounds)
+    other_overhead_ms = max(
+        0,
+        int(execution_timing.duration_ms) - tool_execution_total_ms - llm_wait_total_ms,
+    )
+    return ExecutionBreakdown(
+        tool_execution_total_ms=tool_execution_total_ms,
+        llm_wait_total_ms=llm_wait_total_ms,
+        other_overhead_ms=other_overhead_ms,
     )
 
 

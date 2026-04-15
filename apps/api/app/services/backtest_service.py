@@ -23,7 +23,7 @@ from app.services.execution_lifecycle import (
 )
 from app.services.market_data_store import get_market_data_coverage
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, PortfolioEngine
-from app.services.serializers import backtest_to_dict, trace_to_dict
+from app.services.serializers import TRACE_RUNTIME_METRICS_KEY, backtest_to_dict, trace_to_dict
 from app.services.utils import datetime_to_ms, ensure_utc, new_id, utc_now
 from app.tool_gateway.demo_gateway import build_market_snapshot_for_backtest
 
@@ -266,9 +266,18 @@ def execute_backtest_job(run_id: str) -> None:
                     decision["execution_reference"] = fills[-1]["execution_reference"] if fills else "no_execution"
                     decision["fill_count"] = len(fills)
                     persisted_decision = dict(decision)
+                    runtime_metrics = {}
                     execution_timing = agent_response.get("execution_timing")
+                    execution_breakdown = agent_response.get("execution_breakdown")
+                    llm_rounds = agent_response.get("llm_rounds")
                     if isinstance(execution_timing, dict):
-                        persisted_decision["_execution_timing"] = execution_timing
+                        runtime_metrics["execution_timing"] = execution_timing
+                    if isinstance(execution_breakdown, dict):
+                        runtime_metrics["execution_breakdown"] = execution_breakdown
+                    if isinstance(llm_rounds, list):
+                        runtime_metrics["llm_rounds"] = [item for item in llm_rounds if isinstance(item, dict)]
+                    if runtime_metrics:
+                        persisted_decision[TRACE_RUNTIME_METRICS_KEY] = runtime_metrics
 
                     trace = RunTrace(
                         id=new_id("trace"),

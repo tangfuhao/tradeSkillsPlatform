@@ -19,6 +19,7 @@ def _config(**overrides):
         "novita_base_url": "https://api.novita.ai/openai/v1",
         "allow_compat_model_prefix_routing": False,
         "openai_reasoning_effort": "medium",
+        "execute_reasoning_effort": None,
         "openai_timeout_seconds": 120.0,
     }
     base.update(overrides)
@@ -61,6 +62,14 @@ class StartupPreflightTests(unittest.TestCase):
     def test_preflight_rejects_gpt54_high_reasoning_with_low_timeout(self) -> None:
         errors = collect_startup_preflight_errors(
             _config(openai_reasoning_effort="xhigh", openai_timeout_seconds=60.0),
+            runtime_python=(3, 12),
+            openai_version="1.77.0",
+        )
+        self.assertTrue(any("AGENT_RUNNER_OPENAI_TIMEOUT_SECONDS" in item for item in errors))
+
+    def test_preflight_rejects_gpt54_high_execute_reasoning_with_low_timeout(self) -> None:
+        errors = collect_startup_preflight_errors(
+            _config(execute_reasoning_effort="xhigh", openai_timeout_seconds=60.0),
             runtime_python=(3, 12),
             openai_version="1.77.0",
         )

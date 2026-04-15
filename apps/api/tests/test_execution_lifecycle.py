@@ -37,6 +37,7 @@ from app.services.execution_lifecycle import (
 )
 from app.services.live_service import LiveTaskOwnershipError, LiveTaskService, execute_live_task
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, LIVE_SCOPE_KIND
+from app.services.serializers import trace_to_dict
 
 
 class ExecutionLifecycleTests(unittest.TestCase):
@@ -107,6 +108,29 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 "completed_at_ms": 1704067200091,
                 "duration_ms": 91,
             },
+            "execution_breakdown": {
+                "tool_execution_total_ms": 35,
+                "llm_wait_total_ms": 48,
+                "other_overhead_ms": 8,
+            },
+            "llm_rounds": [
+                {
+                    "round_index": 1,
+                    "started_at_ms": 1704067200000,
+                    "completed_at_ms": 1704067200040,
+                    "llm_round_duration_ms": 40,
+                    "tool_call_count": 1,
+                    "result_type": "tool_calls",
+                },
+                {
+                    "round_index": 2,
+                    "started_at_ms": 1704067200043,
+                    "completed_at_ms": 1704067200051,
+                    "llm_round_duration_ms": 8,
+                    "tool_call_count": 0,
+                    "result_type": "final_output",
+                },
+            ],
         }
 
         with (
@@ -175,11 +199,13 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 ).first()
                 self.assertIsNotNone(stored_trace)
                 assert stored_trace is not None
-                self.assertEqual(stored_trace.decision_json["_execution_timing"]["duration_ms"], 91)
+                self.assertEqual(stored_trace.decision_json["_runtime_metrics"]["execution_timing"]["duration_ms"], 91)
                 trace_payload = BacktestService(db).get_traces(run_id)[0]
                 self.assertEqual(trace_payload["execution_timing"]["duration_ms"], 91)
+                self.assertEqual(trace_payload["execution_breakdown"]["llm_wait_total_ms"], 48)
+                self.assertEqual(trace_payload["llm_rounds"][0]["tool_call_count"], 1)
                 self.assertEqual(trace_payload["tool_calls"][0]["execution_timing"]["duration_ms"], 35)
-                self.assertNotIn("_execution_timing", trace_payload["decision"])
+                self.assertNotIn("_runtime_metrics", trace_payload["decision"])
 
             with self.session_factory() as db:
                 BacktestService(db).delete_run(run_id)
@@ -475,6 +501,53 @@ class ExecutionLifecycleTests(unittest.TestCase):
             ),
             0,
         )
+
+    def test_trace_serializer_preserves_legacy_execution_timing(self) -> None:
+        skill = self.create_skill(title="Legacy Timing Skill")
+        run_id = self.make_id("bt")
+        trace_id = self.make_id("trace")
+
+        with self.session_factory() as db:
+            run = BacktestRun(
+                id=run_id,
+                skill_id=skill.id,
+                status=BACKTEST_STATUS_COMPLETED,
+                scope="historical",
+                start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end_time=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+                initial_capital=10_000.0,
+                benchmark_name="mock-benchmark",
+                total_trigger_count=1,
+                completed_trigger_count=1,
+                summary_json={"total_return_pct": 0.0},
+            )
+            trace = RunTrace(
+                id=trace_id,
+                run_id=run_id,
+                mode="backtest",
+                trace_index=0,
+                trigger_time=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+                decision_json={
+                    "action": "skip",
+                    "_execution_timing": {
+                        "started_at_ms": 1704067200000,
+                        "completed_at_ms": 1704067200042,
+                        "duration_ms": 42,
+                    },
+                },
+                reasoning_summary="Legacy timing payload.",
+                tool_calls_json=[],
+            )
+            db.add_all([run, trace])
+            db.commit()
+            db.refresh(trace)
+
+            payload = trace_to_dict(trace)
+
+        self.assertEqual(payload["execution_timing"]["duration_ms"], 42)
+        self.assertIsNone(payload["execution_breakdown"])
+        self.assertEqual(payload["llm_rounds"], [])
+        self.assertNotIn("_execution_timing", payload["decision"])
 
     def test_scheduler_restore_only_reschedules_active_live_tasks(self) -> None:
         active_skill = self.create_skill(title="Active Skill")

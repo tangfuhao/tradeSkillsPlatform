@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     openai_wire_api: str = "responses"
     openai_model: str = "pa/gpt-5.4"
     openai_reasoning_effort: str = "medium"
+    execute_reasoning_effort: str | None = None
     openai_timeout_seconds: float = 120.0
     openai_temperature: float = 0.1
     openai_max_tool_rounds: int = 8
@@ -47,3 +49,16 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def resolve_execute_reasoning_effort(config: Any | None = None) -> str | None:
+    effective_config = config or settings
+    fields_set = getattr(effective_config, "model_fields_set", None) or getattr(effective_config, "__fields_set__", set())
+    if "execute_reasoning_effort" in fields_set:
+        normalized = str(getattr(effective_config, "execute_reasoning_effort", "") or "").strip()
+        return normalized or None
+    raw_execute_reasoning = getattr(effective_config, "execute_reasoning_effort", None)
+    if raw_execute_reasoning is None:
+        raw_execute_reasoning = getattr(effective_config, "openai_reasoning_effort", None)
+    normalized = str(raw_execute_reasoning or "").strip()
+    return normalized or None

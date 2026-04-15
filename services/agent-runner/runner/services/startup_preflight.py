@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Iterable
 
-from runner.config import Settings, settings
+from runner.config import Settings, resolve_execute_reasoning_effort, settings
 from runner.services.model_routing import (
     is_official_azure_openai_base_url,
     is_official_novita_base_url,
@@ -48,9 +48,11 @@ def collect_startup_preflight_errors(
     if not route.requested_model_name:
         errors.append("AGENT_RUNNER_OPENAI_MODEL must not be empty.")
 
+    effective_execute_reasoning = str(resolve_execute_reasoning_effort(effective_config) or "").lower()
+    effective_global_reasoning = str(effective_config.openai_reasoning_effort or "").strip().lower()
     if (
         route.requested_model_name == "pa/gpt-5.4"
-        and str(effective_config.openai_reasoning_effort or "").strip().lower() in {"high", "xhigh"}
+        and {effective_execute_reasoning, effective_global_reasoning}.intersection({"high", "xhigh"})
         and float(effective_config.openai_timeout_seconds or 0.0) < MIN_TIMEOUT_SECONDS_FOR_GPT54_HIGH_REASONING
     ):
         errors.append(

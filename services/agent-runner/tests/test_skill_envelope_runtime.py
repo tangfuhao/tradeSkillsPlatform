@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from runner.schemas import SkillEnvelopeExtractRequest
+from runner.schemas import ExecutionTiming, SkillEnvelopeExtractRequest
 from runner.services.openai_runtime import StreamRoundResult
 from runner.services.skill_envelope_runtime import OpenAISkillEnvelopeExtractionEngine, _system_prompt
 
@@ -30,6 +30,12 @@ class SkillEnvelopeRuntimeTests(unittest.TestCase):
                     output_text='{"title":"Recovered Title","reasoning_summary":"Recovered title from text.","envelope_patch":{},"warnings":[],"unresolved_fields":[]}',
                     output_items=[],
                     function_calls=[],
+                    execution_timing=ExecutionTiming(
+                        started_at_ms=1704067200000,
+                        completed_at_ms=1704067200010,
+                        duration_ms=10,
+                    ),
+                    result_type="final_output",
                 ),
             ):
                 result = OpenAISkillEnvelopeExtractionEngine().extract(_request())
@@ -46,6 +52,12 @@ class SkillEnvelopeRuntimeTests(unittest.TestCase):
                     output_text="I think the title is obvious from the text.",
                     output_items=[],
                     function_calls=[],
+                    execution_timing=ExecutionTiming(
+                        started_at_ms=1704067200000,
+                        completed_at_ms=1704067200010,
+                        duration_ms=10,
+                    ),
+                    result_type="final_output",
                 ),
             ):
                 with self.assertRaises(RuntimeError) as exc_info:

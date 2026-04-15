@@ -99,6 +99,11 @@ const scopeLabels: Record<string, string> = {
   historical: '历史回放',
 };
 
+const llmRoundResultLabels: Record<string, string> = {
+  tool_calls: '触发工具调用',
+  final_output: '返回最终结果',
+};
+
 function translateToken(value?: string | null, dictionary: Record<string, string> = {}): string {
   if (!value) return '--';
   return dictionary[value] ?? value.replace(/_/g, ' ');
@@ -144,6 +149,10 @@ function describeDirection(direction?: string | null): string {
 
 function describeScope(scope?: string | null): string {
   return translateToken(scope, scopeLabels);
+}
+
+function describeLlmRoundResult(resultType?: string | null): string {
+  return translateToken(resultType, llmRoundResultLabels);
 }
 
 function summarizeDecision(decision: Record<string, unknown>): string {
@@ -922,6 +931,9 @@ export default function ConsolePage() {
                     const simulatedReturn = typeof trace.decision.simulated_return_pct === 'number'
                       ? Number(trace.decision.simulated_return_pct)
                       : null;
+                    const llmRounds = trace.llm_rounds ?? [];
+                    const executionBreakdown = trace.execution_breakdown ?? null;
+                    const hasRuntimeMetrics = Boolean(executionBreakdown || llmRounds.length);
 
                     return (
                       <article className="trace-card" key={trace.id}>
@@ -936,7 +948,15 @@ export default function ConsolePage() {
                               <span className="status-pill is-neutral">{trace.decision.symbol}</span>
                             ) : null}
                             <span className="status-pill is-neutral">{trace.tool_calls.length} 个工具</span>
-                            <span className="status-pill is-neutral">本轮耗时 {formatShortDuration(trace.execution_timing?.duration_ms)}</span>
+                            <span className="status-pill is-neutral">
+                              模型推理/等待 {formatShortDuration(executionBreakdown?.llm_wait_total_ms)}
+                            </span>
+                            <span className="status-pill is-neutral">
+                              工具执行 {formatShortDuration(executionBreakdown?.tool_execution_total_ms)}
+                            </span>
+                            <span className="status-pill is-neutral">
+                              总耗时 {formatShortDuration(trace.execution_timing?.duration_ms)}
+                            </span>
                             {simulatedReturn !== null ? (
                               <span className={`status-pill ${simulatedReturn >= 0 ? 'is-ok' : 'is-error'}`}>
                                 {formatPercent(simulatedReturn)}
@@ -983,6 +1003,59 @@ export default function ConsolePage() {
                                   <pre className="json-block">{formatJson(call.arguments)}</pre>
                                 </div>
                               ))}
+                            </div>
+                          </details>
+                        ) : null}
+
+                        {hasRuntimeMetrics ? (
+                          <details className="trace-details">
+                            <summary>查看模型轮次</summary>
+                            <div className="trace-details-body">
+                              <div className="trace-tool-meta-grid">
+                                <div className="info-box compact-box">
+                                  <p>模型推理/等待</p>
+                                  <strong className="mini-metric">{formatShortDuration(executionBreakdown?.llm_wait_total_ms)}</strong>
+                                </div>
+                                <div className="info-box compact-box">
+                                  <p>其他开销</p>
+                                  <strong className="mini-metric">{formatShortDuration(executionBreakdown?.other_overhead_ms)}</strong>
+                                </div>
+                              </div>
+
+                              {llmRounds.length ? (
+                                <div className="trace-round-list">
+                                  {llmRounds.map((round) => (
+                                    <div className="trace-round-row" key={`${trace.id}-round-${round.round_index}`}>
+                                      <div className="trace-round-head">
+                                        <strong>第 {round.round_index} 轮</strong>
+                                        <span>{describeLlmRoundResult(round.result_type)}</span>
+                                      </div>
+                                      <div className="trace-round-meta-grid">
+                                        <div className="info-box compact-box">
+                                          <p>轮次耗时</p>
+                                          <strong className="mini-metric">{formatShortDuration(round.llm_round_duration_ms)}</strong>
+                                        </div>
+                                        <div className="info-box compact-box">
+                                          <p>工具调用数</p>
+                                          <strong className="mini-metric">{formatCount(round.tool_call_count)}</strong>
+                                        </div>
+                                        <div className="info-box compact-box">
+                                          <p>开始时间</p>
+                                          <strong className="mini-metric">{formatPreciseTime(round.started_at_ms)}</strong>
+                                        </div>
+                                        <div className="info-box compact-box">
+                                          <p>结束时间</p>
+                                          <strong className="mini-metric">{formatPreciseTime(round.completed_at_ms)}</strong>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="empty-state compact-empty">
+                                  <p>当前轨迹没有可用的模型轮次明细。</p>
+                                </div>
+                              )}
                             </div>
                           </details>
                         ) : null}

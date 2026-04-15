@@ -11,7 +11,8 @@ from app.services.execution_lifecycle import (
 from app.services.utils import datetime_to_ms
 
 
-TRACE_EXECUTION_TIMING_KEY = "_execution_timing"
+TRACE_RUNTIME_METRICS_KEY = "_runtime_metrics"
+LEGACY_TRACE_EXECUTION_TIMING_KEY = "_execution_timing"
 
 
 def skill_to_dict(skill: Skill, *, has_active_live_runtime: bool = False, active_live_task_id: str | None = None) -> dict:
@@ -74,9 +75,7 @@ def backtest_to_dict(run: BacktestRun) -> dict:
 def trace_to_dict(trace: RunTrace) -> dict:
     execution_detail = trace.execution_detail
     decision = dict(trace.decision_json or {})
-    execution_timing = decision.pop(TRACE_EXECUTION_TIMING_KEY, None)
-    if not isinstance(execution_timing, dict):
-        execution_timing = None
+    execution_timing, execution_breakdown, llm_rounds = _extract_trace_runtime_metrics(decision)
     return {
         "id": trace.id,
         "trace_index": trace.trace_index,
@@ -84,6 +83,8 @@ def trace_to_dict(trace: RunTrace) -> dict:
         "reasoning_summary": trace.reasoning_summary,
         "decision": decision,
         "execution_timing": execution_timing,
+        "execution_breakdown": execution_breakdown,
+        "llm_rounds": llm_rounds,
         "tool_calls": trace.tool_calls_json or [],
         "portfolio_before": execution_detail.portfolio_before_json if execution_detail else None,
         "portfolio_after": execution_detail.portfolio_after_json if execution_detail else None,
@@ -126,6 +127,9 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "portfolio_before": raw_signal.get("portfolio_before") if isinstance(raw_signal, dict) else None,
         "portfolio_after": raw_signal.get("portfolio_after") if isinstance(raw_signal, dict) else None,
         "fills": raw_signal.get("fills") if isinstance(raw_signal, dict) else [],
+        "execution_timing": raw_signal.get("execution_timing") if isinstance(raw_signal, dict) else None,
+        "execution_breakdown": raw_signal.get("execution_breakdown") if isinstance(raw_signal, dict) else None,
+        "llm_rounds": raw_signal.get("llm_rounds") if isinstance(raw_signal, dict) else [],
     }
     return {
         "id": signal.id,
@@ -135,3 +139,27 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "signal": normalized_signal,
         "created_at_ms": datetime_to_ms(signal.created_at),
     }
+
+
+def _extract_trace_runtime_metrics(decision: dict) -> tuple[dict | None, dict | None, list[dict]]:
+    runtime_metrics = decision.pop(TRACE_RUNTIME_METRICS_KEY, None)
+    execution_timing = None
+    execution_breakdown = None
+    llm_rounds: list[dict] = []
+
+    if isinstance(runtime_metrics, dict):
+        candidate_execution_timing = runtime_metrics.get("execution_timing")
+        if isinstance(candidate_execution_timing, dict):
+            execution_timing = candidate_execution_timing
+        candidate_execution_breakdown = runtime_metrics.get("execution_breakdown")
+        if isinstance(candidate_execution_breakdown, dict):
+            execution_breakdown = candidate_execution_breakdown
+        candidate_llm_rounds = runtime_metrics.get("llm_rounds")
+        if isinstance(candidate_llm_rounds, list):
+            llm_rounds = [item for item in candidate_llm_rounds if isinstance(item, dict)]
+
+    legacy_execution_timing = decision.pop(LEGACY_TRACE_EXECUTION_TIMING_KEY, None)
+    if execution_timing is None and isinstance(legacy_execution_timing, dict):
+        execution_timing = legacy_execution_timing
+
+    return execution_timing, execution_breakdown, llm_rounds

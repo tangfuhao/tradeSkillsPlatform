@@ -97,6 +97,21 @@ export type ExecutionTiming = {
   duration_ms?: number | null;
 };
 
+export type ExecutionBreakdown = {
+  tool_execution_total_ms?: number | null;
+  llm_wait_total_ms?: number | null;
+  other_overhead_ms?: number | null;
+};
+
+export type LlmRoundSummary = {
+  round_index: number;
+  started_at_ms?: number | null;
+  completed_at_ms?: number | null;
+  llm_round_duration_ms?: number | null;
+  tool_call_count?: number | null;
+  result_type?: 'tool_calls' | 'final_output' | string;
+};
+
 export type BacktestRun = {
   id: string;
   skill_id: string;
@@ -180,6 +195,8 @@ export type BacktestTrace = {
   reasoning_summary: string;
   decision: Record<string, unknown>;
   execution_timing?: ExecutionTiming | null;
+  execution_breakdown?: ExecutionBreakdown | null;
+  llm_rounds?: LlmRoundSummary[];
   tool_calls: ToolCall[];
   portfolio_before?: PortfolioState | null;
   portfolio_after?: PortfolioState | null;
@@ -215,6 +232,9 @@ export type LiveSignal = {
     provider?: string;
     error_message?: string;
     execution_time_ms?: number | null;
+    execution_timing?: ExecutionTiming | null;
+    execution_breakdown?: ExecutionBreakdown | null;
+    llm_rounds?: LlmRoundSummary[];
     portfolio_before?: PortfolioState | null;
     portfolio_after?: PortfolioState | null;
     fills?: PortfolioFill[];
