@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import BacktestRun, RunTrace, Skill
-from app.services.agent_runner_client import execute_agent_run
+from app.services.agent_run_recovery import AgentRunAborted, AgentRunRecoveryError, execute_agent_run_with_recovery
 from app.services.demo_runtime import build_trigger_times, compute_max_drawdown
 from app.services.execution_cleanup import delete_backtest_run
 from app.services.execution_lifecycle import (
@@ -56,6 +56,7 @@ class BacktestService:
             control_requested=None,
             last_processed_trace_index=None,
             last_processed_trigger_time_ms=None,
+            last_runtime_error_json=None,
         )
         self.db.add(run)
         engine = PortfolioEngine(
@@ -130,6 +131,7 @@ class BacktestService:
             run.status = BACKTEST_STATUS_RUNNING
             run.control_requested = None
             run.error_message = None
+            run.last_runtime_error_json = None
             should_enqueue = True
         elif normalized == "stop":
             if run.status == BACKTEST_STATUS_QUEUED:
@@ -188,6 +190,7 @@ def execute_backtest_job(run_id: str) -> None:
             run.total_trigger_count = len(trigger_times)
             run.status = BACKTEST_STATUS_RUNNING
             run.error_message = None
+            run.last_runtime_error_json = None
             db.add(run)
 
             if run.completed_trigger_count == 0:
@@ -198,23 +201,7 @@ def execute_backtest_job(run_id: str) -> None:
             market_data_provider = "historical_db"
 
             for trace_index in range(int(run.completed_trigger_count or 0), len(trigger_times)):
-                persisted_run = db.get(BacktestRun, run_id)
-                if persisted_run is None:
-                    return
-                if persisted_run.status == BACKTEST_STATUS_STOPPING:
-                    persisted_run.status = BACKTEST_STATUS_STOPPED
-                    persisted_run.updated_at = utc_now()
-                    db.add(persisted_run)
-                    db.commit()
-                    return
-                if persisted_run.control_requested == "pause":
-                    persisted_run.status = BACKTEST_STATUS_PAUSED
-                    persisted_run.control_requested = None
-                    persisted_run.updated_at = utc_now()
-                    db.add(persisted_run)
-                    db.commit()
-                    return
-                if persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}:
+                if _stop_backtest_if_requested(db, run_id):
                     return
 
                 trigger_time = trigger_times[trace_index]
@@ -252,7 +239,11 @@ def execute_backtest_job(run_id: str) -> None:
                             ),
                         },
                     }
-                    agent_response = execute_agent_run(payload)
+                    agent_response, recovery = execute_agent_run_with_recovery(
+                        payload,
+                        mode="backtest",
+                        should_abort=lambda: _backtest_retry_should_abort(db, run_id),
+                    )
                     decision = dict(agent_response["decision"])
                     state_patch = decision.get("state_patch") or {}
                     if state_patch:
@@ -276,6 +267,7 @@ def execute_backtest_job(run_id: str) -> None:
                         runtime_metrics["execution_breakdown"] = execution_breakdown
                     if isinstance(llm_rounds, list):
                         runtime_metrics["llm_rounds"] = [item for item in llm_rounds if isinstance(item, dict)]
+                    runtime_metrics["recovery"] = recovery
                     if runtime_metrics:
                         persisted_decision[TRACE_RUNTIME_METRICS_KEY] = runtime_metrics
 
@@ -310,10 +302,30 @@ def execute_backtest_job(run_id: str) -> None:
                     persisted_run.completed_trigger_count = trace_index + 1
                     persisted_run.last_processed_trace_index = trace_index
                     persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_time)
+                    persisted_run.last_runtime_error_json = None
                     persisted_run.updated_at = utc_now()
                     db.add(persisted_run)
                     db.commit()
                     equity_curve.append(float((portfolio_after.get("account") or {}).get("equity", run.initial_capital)))
+                except AgentRunAborted:
+                    db.rollback()
+                    if _stop_backtest_if_requested(db, run_id):
+                        return
+                    raise RuntimeError(
+                        f"Backtest step {trace_index + 1} at {trigger_time.isoformat()} aborted unexpectedly."
+                    ) from None
+                except AgentRunRecoveryError as exc:
+                    db.rollback()
+                    _mark_run_failed(
+                        db,
+                        run_id,
+                        f"Backtest step {trace_index + 1} at {trigger_time.isoformat()} failed: {exc}",
+                        runtime_error=exc.backtest_runtime_error(
+                            failed_trace_index=trace_index,
+                            trigger_time_ms=datetime_to_ms(trigger_time),
+                        ),
+                    )
+                    return
                 except Exception as exc:
                     db.rollback()
                     raise RuntimeError(
@@ -342,6 +354,7 @@ def execute_backtest_job(run_id: str) -> None:
             persisted_run.completed_trigger_count = len(trigger_times)
             persisted_run.last_processed_trace_index = len(trigger_times) - 1 if trigger_times else None
             persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_times[-1]) if trigger_times else None
+            persisted_run.last_runtime_error_json = None
             persisted_run.updated_at = utc_now()
             db.add(persisted_run)
             db.commit()
@@ -351,18 +364,52 @@ def execute_backtest_job(run_id: str) -> None:
 
 
 
-def _mark_run_failed(db: Session, run_id: str, message: str) -> None:
+def _mark_run_failed(db: Session, run_id: str, message: str, *, runtime_error: dict[str, Any] | None = None) -> None:
     persisted_run = db.get(BacktestRun, run_id)
     if persisted_run is None:
         return
     persisted_run.status = BACKTEST_STATUS_FAILED
     persisted_run.control_requested = None
     persisted_run.error_message = message
+    persisted_run.last_runtime_error_json = runtime_error
     persisted_run.updated_at = utc_now()
     db.add(persisted_run)
     db.commit()
 
 
+
+
+
+def _stop_backtest_if_requested(db: Session, run_id: str) -> bool:
+    db.expire_all()
+    persisted_run = db.get(BacktestRun, run_id)
+    if persisted_run is None:
+        return True
+    if persisted_run.status == BACKTEST_STATUS_STOPPING:
+        persisted_run.status = BACKTEST_STATUS_STOPPED
+        persisted_run.updated_at = utc_now()
+        db.add(persisted_run)
+        db.commit()
+        return True
+    if persisted_run.control_requested == "pause":
+        persisted_run.status = BACKTEST_STATUS_PAUSED
+        persisted_run.control_requested = None
+        persisted_run.updated_at = utc_now()
+        db.add(persisted_run)
+        db.commit()
+        return True
+    return persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}
+
+
+def _backtest_retry_should_abort(db: Session, run_id: str) -> bool:
+    db.expire_all()
+    persisted_run = db.get(BacktestRun, run_id)
+    if persisted_run is None:
+        return True
+    return bool(
+        persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPING, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}
+        or persisted_run.control_requested == "pause"
+    )
 
 def _validate_backtest_window(db: Session, start_time: datetime, end_time: datetime, cadence: str) -> tuple[list[datetime], bool]:
     if end_time <= start_time:
@@ -430,6 +477,7 @@ def _reset_run_execution_state(db: Session, run: BacktestRun, engine: PortfolioE
     run.last_processed_trace_index = None
     run.last_processed_trigger_time_ms = None
     run.summary_json = None
+    run.last_runtime_error_json = None
     run.error_message = None
     db.add(run)
 

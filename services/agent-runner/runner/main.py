@@ -11,6 +11,7 @@ from runner.schemas import (
     SkillEnvelopeExtractResponse,
 )
 from runner.services.decision_engine import get_engine
+from runner.services.runtime_errors import to_http_exception
 from runner.services.skill_envelope_runtime import OpenAISkillEnvelopeExtractionEngine
 from runner.services.startup_preflight import assert_startup_preflight
 
@@ -48,7 +49,7 @@ def execute_run(payload: ExecuteRunRequest) -> ExecuteRunResponse:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise to_http_exception(exc) from exc
 
 
 @app.post("/v1/skills/extract-envelope", response_model=SkillEnvelopeExtractResponse)
@@ -59,4 +60,4 @@ def extract_skill_envelope(payload: SkillEnvelopeExtractRequest) -> SkillEnvelop
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise to_http_exception(exc) from exc

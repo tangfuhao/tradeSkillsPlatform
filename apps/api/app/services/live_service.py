@@ -8,10 +8,10 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import LiveSignal, LiveTask, Skill
-from app.services.agent_runner_client import execute_agent_run
+from app.services.agent_run_recovery import AgentRunAborted, AgentRunRecoveryError, execute_agent_run_with_recovery
 from app.services.demo_runtime import cadence_to_seconds
 from app.services.execution_cleanup import delete_live_task
-from app.services.execution_lifecycle import LIVE_RUNTIME_OWNING_STATUSES, LIVE_STATUS_ACTIVE, LIVE_STATUS_FAILED, LIVE_STATUS_PAUSED, LIVE_STATUS_STOPPED
+from app.services.execution_lifecycle import LIVE_RUNTIME_OWNING_STATUSES, LIVE_STATUS_ACTIVE, LIVE_STATUS_PAUSED, LIVE_STATUS_STOPPED
 from app.services.portfolio_engine import DEFAULT_LIVE_INITIAL_CAPITAL, LIVE_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import live_signal_to_dict, live_task_to_dict
 from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
@@ -187,7 +187,11 @@ def execute_live_task(task_id: str) -> dict[str, Any] | None:
                     ),
                 },
             }
-            agent_response = execute_agent_run(payload)
+            agent_response, recovery = execute_agent_run_with_recovery(
+                payload,
+                mode="live_signal",
+                should_abort=lambda: _live_retry_should_abort(db, task_id),
+            )
             decision = dict(agent_response["decision"])
             state_patch = decision.get("state_patch") or {}
             if state_patch:
@@ -217,17 +221,20 @@ def execute_live_task(task_id: str) -> dict[str, Any] | None:
                     "portfolio_before": portfolio_before,
                     "portfolio_after": portfolio_after,
                     "fills": fills,
+                    "recovery": recovery,
                 },
             )
             db.add(signal)
             db.add(task)
             db.commit()
-        except Exception as exc:
+        except AgentRunAborted:
+            db.rollback()
+            return None if _live_retry_should_abort(db, task_id) else None
+        except AgentRunRecoveryError as exc:
             db.rollback()
             task = db.get(LiveTask, task_id)
             if task is None:
                 return None
-            task.status = LIVE_STATUS_FAILED if task.status == LIVE_STATUS_ACTIVE else task.status
             signal = LiveSignal(
                 id=new_id("sig"),
                 live_task_id=task.id,
@@ -238,6 +245,43 @@ def execute_live_task(task_id: str) -> dict[str, Any] | None:
                     "provider": settings.agent_runner_base_url,
                     "mode": "live_signal",
                     "execution_scope": {"scope_kind": LIVE_SCOPE_KIND, "scope_id": task.id},
+                    "recovery": exc.recovery_payload(),
+                },
+            )
+            db.add(signal)
+            db.add(task)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            task = db.get(LiveTask, task_id)
+            if task is None:
+                return None
+            signal = LiveSignal(
+                id=new_id("sig"),
+                live_task_id=task.id,
+                trigger_time=trigger_time,
+                delivery_status="failed",
+                signal_json={
+                    "error_message": str(exc),
+                    "provider": settings.agent_runner_base_url,
+                    "mode": "live_signal",
+                    "execution_scope": {"scope_kind": LIVE_SCOPE_KIND, "scope_id": task.id},
+                    "recovery": {
+                        "attempt_count": 1,
+                        "recovered": False,
+                        "retry_count": 0,
+                        "retryable": False,
+                        "final_error": {
+                            "message": str(exc),
+                            "error_type": "live_runtime_error",
+                            "source": "live_runtime",
+                            "retryable": False,
+                            "last_http_status": None,
+                            "upstream_status": None,
+                            "retry_after_seconds": None,
+                            "code": None,
+                        },
+                    },
                 },
             )
             db.add(signal)
@@ -256,42 +300,6 @@ def _resolve_snapshot_as_of(market_snapshot: dict[str, Any], fallback) -> Any:
     return fallback
 
 
-def _build_tool_gateway_context(
-    *,
-    skill_id: str,
-    scope_kind: str,
-    scope_id: str,
-    mode: str,
-    trigger_time_ms: int,
-    as_of_ms: int,
-    trace_index: int | None,
-) -> dict[str, Any]:
-    return {
-        "base_url": f"{settings.tool_gateway_base_url.rstrip('/')}{settings.api_prefix}/internal/tool-gateway",
-        "execute_url": f"{settings.tool_gateway_base_url.rstrip('/')}{settings.api_prefix}/internal/tool-gateway/execute",
-        "shared_secret": settings.tool_gateway_shared_secret,
-        "skill_id": skill_id,
-        "scope_kind": scope_kind,
-        "scope_id": scope_id,
-        "mode": mode,
-        "trigger_time_ms": trigger_time_ms,
-        "as_of_ms": as_of_ms,
-        "trace_index": trace_index,
-    }
-
-
-def _portfolio_hint(portfolio: dict[str, Any]) -> dict[str, Any]:
-    account = portfolio.get("account") or {}
-    positions = portfolio.get("positions") or []
-    return {
-        "equity": account.get("equity"),
-        "realized_pnl": account.get("realized_pnl"),
-        "unrealized_pnl": account.get("unrealized_pnl"),
-        "open_position_count": len(positions),
-        "symbols": [item.get("symbol") for item in positions[:5]],
-    }
-
-
 
 def _build_tool_gateway_context(
     *,
@@ -328,3 +336,10 @@ def _portfolio_hint(portfolio: dict[str, Any]) -> dict[str, Any]:
         "open_position_count": len(positions),
         "symbols": [item.get("symbol") for item in positions[:5]],
     }
+
+
+
+def _live_retry_should_abort(db: Session, task_id: str) -> bool:
+    db.expire_all()
+    task = db.get(LiveTask, task_id)
+    return task is None or task.status != LIVE_STATUS_ACTIVE

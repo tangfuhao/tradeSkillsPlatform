@@ -23,6 +23,8 @@ from app.models import (
     TraceExecutionDetail,
 )
 from app.runtime.scheduler import SchedulerManager
+from app.services.agent_runner_client import AgentRunnerErrorDetail, AgentRunnerRequestError
+from app.services.agent_run_recovery import AgentRunRecoveryError
 from app.services.backtest_service import BacktestService, execute_backtest_job
 from app.services.execution_cleanup import delete_strategy_cascade
 from app.services.execution_lifecycle import (
@@ -162,7 +164,13 @@ class ExecutionLifecycleTests(unittest.TestCase):
                         other_db.commit()
                 return response_payload
 
-            with patch("app.services.backtest_service.execute_agent_run", side_effect=pause_after_first_step):
+            with patch(
+                "app.services.backtest_service.execute_agent_run_with_recovery",
+                side_effect=lambda payload, **_kwargs: (
+                    pause_after_first_step(payload),
+                    {"attempt_count": 1, "recovered": False, "retry_count": 0},
+                ),
+            ):
                 execute_backtest_job(run_id)
 
             with self.session_factory() as db:
@@ -181,7 +189,10 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 self.assertTrue(should_enqueue)
                 self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
 
-            with patch("app.services.backtest_service.execute_agent_run", return_value=response_payload):
+            with patch(
+                "app.services.backtest_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ):
                 execute_backtest_job(run_id)
 
             with self.session_factory() as db:
@@ -230,6 +241,145 @@ class ExecutionLifecycleTests(unittest.TestCase):
             0,
         )
 
+    def test_backtest_records_recovery_metadata_when_runner_recovers(self) -> None:
+        skill = self.create_skill(title="Recovering Backtest Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=30)
+        trigger_times = [start_time, start_time + timedelta(minutes=15)]
+        response_payload = {
+            "decision": {"action": "skip", "reason": "Wait."},
+            "reasoning_summary": "Recovered after retries.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                run_id = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)["id"]
+
+            recoveries = [
+                {"attempt_count": 3, "recovered": True, "retry_count": 2},
+                {"attempt_count": 1, "recovered": False, "retry_count": 0},
+            ]
+
+            def fake_recovery(*_args, **_kwargs):
+                return response_payload, recoveries.pop(0)
+
+            with patch("app.services.backtest_service.execute_agent_run_with_recovery", side_effect=fake_recovery):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(run)
+                assert run is not None
+                self.assertEqual(run.status, BACKTEST_STATUS_COMPLETED)
+                self.assertIsNone(run.last_runtime_error_json)
+                traces = BacktestService(db).get_traces(run_id)
+                self.assertEqual(traces[0]["recovery"]["attempt_count"], 3)
+                self.assertTrue(traces[0]["recovery"]["recovered"])
+                self.assertEqual(traces[1]["recovery"]["attempt_count"], 1)
+                self.assertFalse(traces[1]["recovery"]["recovered"])
+
+    def test_backtest_failed_retry_keeps_checkpoint_and_resume_replays_same_step(self) -> None:
+        skill = self.create_skill(title="Retry Resume Backtest Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=45)
+        trigger_times = [start_time, start_time + timedelta(minutes=15), start_time + timedelta(minutes=30)]
+        response_payload = {
+            "decision": {"action": "skip", "reason": "Wait."},
+            "reasoning_summary": "Recovered.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+        final_error = AgentRunnerRequestError(
+            operation="run execution",
+            status_code=503,
+            detail=AgentRunnerErrorDetail(
+                retryable=True,
+                source="agent_runner",
+                error_type="too_many_requests",
+                message="Too Many Requests",
+            ),
+        )
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                run_id = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)["id"]
+
+            first_pass = [
+                (response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+                AgentRunRecoveryError(attempt_count=4, final_error=final_error),
+            ]
+
+            def first_pass_recovery(*_args, **_kwargs):
+                result = first_pass.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            with patch("app.services.backtest_service.execute_agent_run_with_recovery", side_effect=first_pass_recovery):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                failed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(failed_run)
+                assert failed_run is not None
+                self.assertEqual(failed_run.status, BACKTEST_STATUS_FAILED)
+                self.assertEqual(failed_run.completed_trigger_count, 1)
+                self.assertEqual(failed_run.last_runtime_error_json["failed_trace_index"], 1)
+                self.assertEqual(failed_run.last_runtime_error_json["attempt_count"], 4)
+                self.assertEqual(self.count_rows(RunTrace, RunTrace.run_id == run_id), 1)
+
+            with self.session_factory() as db:
+                resumed_payload, should_enqueue = BacktestService(db).control_run(run_id, "resume")
+                self.assertTrue(should_enqueue)
+                self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
+                self.assertIsNone(resumed_payload["last_runtime_error"])
+
+            second_pass = [
+                (response_payload, {"attempt_count": 2, "recovered": True, "retry_count": 1}),
+                (response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ]
+            with patch(
+                "app.services.backtest_service.execute_agent_run_with_recovery",
+                side_effect=lambda *_args, **_kwargs: second_pass.pop(0),
+            ):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                completed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(completed_run)
+                assert completed_run is not None
+                self.assertEqual(completed_run.status, BACKTEST_STATUS_COMPLETED)
+                self.assertEqual(completed_run.completed_trigger_count, 3)
+                self.assertIsNone(completed_run.last_runtime_error_json)
+                traces = db.scalars(
+                    select(RunTrace).where(RunTrace.run_id == run_id).order_by(RunTrace.trace_index.asc())
+                ).all()
+                self.assertEqual([trace.trace_index for trace in traces], [0, 1, 2])
+
     def test_failed_backtest_resumes_from_last_successful_checkpoint(self) -> None:
         skill = self.create_skill(title="Recoverable Backtest Skill")
         start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -269,7 +419,13 @@ class ExecutionLifecycleTests(unittest.TestCase):
                     raise next_item
                 return next_item
 
-            with patch("app.services.backtest_service.execute_agent_run", side_effect=fail_on_second_step):
+            with patch(
+                "app.services.backtest_service.execute_agent_run_with_recovery",
+                side_effect=lambda payload, **_kwargs: (
+                    fail_on_second_step(payload),
+                    {"attempt_count": 1, "recovered": False, "retry_count": 0},
+                ),
+            ):
                 execute_backtest_job(run_id)
 
             with self.session_factory() as db:
@@ -294,7 +450,10 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
                 self.assertIsNone(resumed_payload["error_message"])
 
-            with patch("app.services.backtest_service.execute_agent_run", return_value=response_payload):
+            with patch(
+                "app.services.backtest_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ):
                 execute_backtest_job(run_id)
 
             with self.session_factory() as db:
@@ -339,7 +498,10 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 run_id = created["id"]
 
             with (
-                patch("app.services.backtest_service.execute_agent_run", return_value=response_payload),
+                patch(
+                    "app.services.backtest_service.execute_agent_run_with_recovery",
+                    return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+                ),
                 patch(
                     "app.services.backtest_service.compute_max_drawdown",
                     side_effect=[RuntimeError("summary aggregation failed"), 0.0],
@@ -367,7 +529,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
 
             with patch(
-                "app.services.backtest_service.execute_agent_run",
+                "app.services.backtest_service.execute_agent_run_with_recovery",
                 side_effect=AssertionError("resume should not rerun completed trigger steps"),
             ):
                 execute_backtest_job(run_id)
@@ -452,7 +614,10 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 "app.services.live_service.build_market_snapshot_for_live",
                 return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
             ),
-            patch("app.services.live_service.execute_agent_run", return_value=response_payload),
+            patch(
+                "app.services.live_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ),
         ):
             signal = execute_live_task(task_id)
 
@@ -501,6 +666,78 @@ class ExecutionLifecycleTests(unittest.TestCase):
             ),
             0,
         )
+
+    def test_live_runtime_records_recovery_metadata_on_success(self) -> None:
+        skill = self.create_skill(title="Live Recovery Skill")
+        response_payload = {
+            "decision": {"action": "skip", "reason": "Wait."},
+            "reasoning_summary": "Recovered after retry.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch(
+                "app.services.live_service.build_market_snapshot_for_live",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch(
+                "app.services.live_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 2, "recovered": True, "retry_count": 1}),
+            ),
+        ):
+            signal = execute_live_task(task_id)
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal["delivery_status"], "stored")
+        self.assertEqual(signal["signal"]["recovery"]["attempt_count"], 2)
+        self.assertTrue(signal["signal"]["recovery"]["recovered"])
+
+    def test_live_runtime_failed_retry_keeps_task_active(self) -> None:
+        skill = self.create_skill(title="Live Failure Skill")
+        final_error = AgentRunnerRequestError(
+            operation="run execution",
+            status_code=503,
+            detail=AgentRunnerErrorDetail(
+                retryable=True,
+                source="agent_runner",
+                error_type="too_many_requests",
+                message="Too Many Requests",
+            ),
+        )
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch(
+                "app.services.live_service.build_market_snapshot_for_live",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch(
+                "app.services.live_service.execute_agent_run_with_recovery",
+                side_effect=AgentRunRecoveryError(attempt_count=3, final_error=final_error),
+            ),
+        ):
+            signal = execute_live_task(task_id)
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal["delivery_status"], "failed")
+        self.assertEqual(signal["signal"]["recovery"]["attempt_count"], 3)
+        self.assertTrue(signal["signal"]["recovery"]["retryable"])
+
+        with self.session_factory() as db:
+            task = db.get(LiveTask, task_id)
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(task.status, LIVE_STATUS_ACTIVE)
 
     def test_trace_serializer_preserves_legacy_execution_timing(self) -> None:
         skill = self.create_skill(title="Legacy Timing Skill")

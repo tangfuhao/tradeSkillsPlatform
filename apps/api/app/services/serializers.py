@@ -66,6 +66,7 @@ def backtest_to_dict(run: BacktestRun) -> dict:
             extra_ms=run.last_processed_trigger_time_ms,
         ),
         "summary": run.summary_json,
+        "last_runtime_error": run.last_runtime_error_json,
         "error_message": run.error_message,
         "created_at_ms": datetime_to_ms(run.created_at),
         "updated_at_ms": datetime_to_ms(run.updated_at),
@@ -75,7 +76,7 @@ def backtest_to_dict(run: BacktestRun) -> dict:
 def trace_to_dict(trace: RunTrace) -> dict:
     execution_detail = trace.execution_detail
     decision = dict(trace.decision_json or {})
-    execution_timing, execution_breakdown, llm_rounds = _extract_trace_runtime_metrics(decision)
+    execution_timing, execution_breakdown, llm_rounds, recovery = _extract_trace_runtime_metrics(decision)
     return {
         "id": trace.id,
         "trace_index": trace.trace_index,
@@ -85,6 +86,7 @@ def trace_to_dict(trace: RunTrace) -> dict:
         "execution_timing": execution_timing,
         "execution_breakdown": execution_breakdown,
         "llm_rounds": llm_rounds,
+        "recovery": recovery,
         "tool_calls": trace.tool_calls_json or [],
         "portfolio_before": execution_detail.portfolio_before_json if execution_detail else None,
         "portfolio_after": execution_detail.portfolio_after_json if execution_detail else None,
@@ -130,6 +132,7 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "execution_timing": raw_signal.get("execution_timing") if isinstance(raw_signal, dict) else None,
         "execution_breakdown": raw_signal.get("execution_breakdown") if isinstance(raw_signal, dict) else None,
         "llm_rounds": raw_signal.get("llm_rounds") if isinstance(raw_signal, dict) else [],
+        "recovery": raw_signal.get("recovery") if isinstance(raw_signal, dict) else None,
     }
     return {
         "id": signal.id,
@@ -141,11 +144,12 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
     }
 
 
-def _extract_trace_runtime_metrics(decision: dict) -> tuple[dict | None, dict | None, list[dict]]:
+def _extract_trace_runtime_metrics(decision: dict) -> tuple[dict | None, dict | None, list[dict], dict | None]:
     runtime_metrics = decision.pop(TRACE_RUNTIME_METRICS_KEY, None)
     execution_timing = None
     execution_breakdown = None
     llm_rounds: list[dict] = []
+    recovery = None
 
     if isinstance(runtime_metrics, dict):
         candidate_execution_timing = runtime_metrics.get("execution_timing")
@@ -157,9 +161,12 @@ def _extract_trace_runtime_metrics(decision: dict) -> tuple[dict | None, dict | 
         candidate_llm_rounds = runtime_metrics.get("llm_rounds")
         if isinstance(candidate_llm_rounds, list):
             llm_rounds = [item for item in candidate_llm_rounds if isinstance(item, dict)]
+        candidate_recovery = runtime_metrics.get("recovery")
+        if isinstance(candidate_recovery, dict):
+            recovery = candidate_recovery
 
     legacy_execution_timing = decision.pop(LEGACY_TRACE_EXECUTION_TIMING_KEY, None)
     if execution_timing is None and isinstance(legacy_execution_timing, dict):
         execution_timing = legacy_execution_timing
 
-    return execution_timing, execution_breakdown, llm_rounds
+    return execution_timing, execution_breakdown, llm_rounds, recovery

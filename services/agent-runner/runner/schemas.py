@@ -90,3 +90,13 @@ class SkillEnvelopeExtractResponse(BaseModel):
     unresolved_fields: list[str] = Field(default_factory=list)
     reasoning_summary: str
     provider: str
+
+
+class RunnerErrorDetail(BaseModel):
+    retryable: bool = False
+    source: str = "runner"
+    error_type: str = "runner_error"
+    message: str
+    upstream_status: int | None = None
+    retry_after_seconds: float | None = None
+    code: str | None = None

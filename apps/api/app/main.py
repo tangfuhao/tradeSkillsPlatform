@@ -33,6 +33,8 @@ def ensure_runtime_schema() -> None:
         statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trace_index INTEGER")
     if "last_processed_trigger_time_ms" not in existing_columns:
         statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trigger_time_ms BIGINT")
+    if "last_runtime_error_json" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_runtime_error_json JSON")
 
     if not statements:
         return

@@ -66,6 +66,7 @@ class TraceResponse(BaseModel):
     execution_timing: dict[str, Any] | None = None
     execution_breakdown: dict[str, Any] | None = None
     llm_rounds: list[dict[str, Any]] = Field(default_factory=list)
+    recovery: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]]
     portfolio_before: dict[str, Any] | None = None
     portfolio_after: dict[str, Any] | None = None
@@ -86,6 +87,7 @@ class BacktestResponse(BaseModel):
     available_actions: list[str] = Field(default_factory=list)
     last_activity_at_ms: int | None = None
     summary: dict[str, Any] | None
+    last_runtime_error: dict[str, Any] | None = None
     error_message: str | None
     created_at_ms: int
     updated_at_ms: int

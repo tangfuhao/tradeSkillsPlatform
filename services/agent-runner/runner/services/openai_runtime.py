@@ -24,6 +24,7 @@ from runner.schemas import (
 )
 from runner.services.model_routing import get_responses_client
 from runner.services.responses_payload_builder import build_responses_request_payload
+from runner.services.runtime_errors import build_stream_event_error
 from runner.services.tool_gateway_client import ToolGatewayClient
 
 
@@ -737,7 +738,7 @@ def _stream_response_round(
                     continue
 
             if event_type == "error":
-                raise RuntimeError(str(_event_field(event, "error") or "Responses API stream failed."))
+                raise build_stream_event_error(_event_field(event, "error"))
 
     function_calls = [item for item in output_items if item.get("type") == "function_call"]
     output_text = "".join(output_text_parts).strip()
