@@ -4,6 +4,7 @@ import io
 import json
 import math
 import statistics
+import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 from openai import OpenAI
 
 from runner.config import settings
-from runner.schemas import AgentDecision, ExecuteRunRequest, ExecuteRunResponse, RiskTarget, ToolCallSummary
+from runner.schemas import AgentDecision, ExecuteRunRequest, ExecuteRunResponse, ExecutionTiming, RiskTarget, ToolCallSummary
 from runner.services.model_routing import get_responses_client
 from runner.services.responses_payload_builder import build_responses_request_payload
 from runner.services.tool_gateway_client import ToolGatewayClient
@@ -29,10 +30,17 @@ class StreamRoundResult:
 
 
 @dataclass(slots=True)
+class TimingCheckpoint:
+    started_at_ms: int
+    started_monotonic_ns: int
+
+
+@dataclass(slots=True)
 class OpenAIToolDecisionEngine:
     provider: str = "openai-tools"
 
     def execute(self, payload: ExecuteRunRequest) -> ExecuteRunResponse:
+        run_timing = _start_timing()
         runtime = ToolRuntime(payload)
         conversation_items = _build_prompt_input_items(payload)
         tool_summaries: list[ToolCallSummary] = []
@@ -46,12 +54,14 @@ class OpenAIToolDecisionEngine:
                     call_name = str(call.get("name") or "")
                     raw_arguments = str(call.get("arguments") or "{}")
                     arguments = _parse_json_object(raw_arguments)
+                    tool_timing = _start_timing()
                     result = runtime.execute_tool(call_name, arguments)
                     tool_summaries.append(
                         ToolCallSummary(
                             tool_name=call_name,
                             arguments=arguments,
                             status=result.get("status", "executed"),
+                            execution_timing=_finish_timing(tool_timing),
                         )
                     )
                     function_outputs.append(
@@ -73,6 +83,7 @@ class OpenAIToolDecisionEngine:
                     tool_summaries=tool_summaries,
                     raw_output=round_result.output_text,
                     provider=self.provider,
+                    execution_timing=_finish_timing(run_timing),
                 )
             decision_payload = final_payload.get("decision", final_payload)
             reasoning_summary = final_payload.get("reasoning_summary") or _default_reasoning_summary(tool_summaries)
@@ -82,6 +93,7 @@ class OpenAIToolDecisionEngine:
                 reasoning_summary=reasoning_summary,
                 tool_calls=tool_summaries,
                 provider=self.provider,
+                execution_timing=_finish_timing(run_timing),
             )
 
         raise RuntimeError("LLM tool loop exceeded the configured maximum number of rounds.")
@@ -760,6 +772,7 @@ def _fallback_non_json_response(
     tool_summaries: list[ToolCallSummary],
     raw_output: str,
     provider: str,
+    execution_timing: ExecutionTiming,
 ) -> ExecuteRunResponse:
     snippet = _compact_model_output(raw_output)
     decision_reason = (
@@ -782,6 +795,7 @@ def _fallback_non_json_response(
         reasoning_summary=reasoning_summary,
         tool_calls=tool_summaries,
         provider=provider,
+        execution_timing=execution_timing,
     )
 
 
@@ -792,6 +806,23 @@ def _compact_model_output(raw_output: str, *, limit: int = 160) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[: limit - 3]}..."
+
+
+def _start_timing() -> TimingCheckpoint:
+    return TimingCheckpoint(
+        started_at_ms=time.time_ns() // 1_000_000,
+        started_monotonic_ns=time.monotonic_ns(),
+    )
+
+
+def _finish_timing(checkpoint: TimingCheckpoint) -> ExecutionTiming:
+    completed_at_ms = time.time_ns() // 1_000_000
+    duration_ms = max(0, (time.monotonic_ns() - checkpoint.started_monotonic_ns) // 1_000_000)
+    return ExecutionTiming(
+        started_at_ms=checkpoint.started_at_ms,
+        completed_at_ms=max(completed_at_ms, checkpoint.started_at_ms),
+        duration_ms=duration_ms,
+    )
 
 
 def _sanitize_decision(payload: ExecuteRunRequest, runtime: ToolRuntime, decision_payload: dict[str, Any]) -> AgentDecision:

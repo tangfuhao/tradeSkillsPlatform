@@ -79,6 +79,18 @@ export function formatTime(value?: number | null): string {
   }).format(date);
 }
 
+export function formatPreciseTime(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  const base = new Intl.DateTimeFormat(LOCALE, {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+    hour12: false,
+  }).format(date);
+  return `${base}.${String(date.getMilliseconds()).padStart(3, '0')}`;
+}
+
 export function formatCount(value?: number | null): string {
   if (typeof value !== 'number' || Number.isNaN(value)) return '--';
   return new Intl.NumberFormat(LOCALE).format(value);
@@ -166,6 +178,12 @@ export function countSignalsToday(signals: LiveSignal[]): number {
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+export function formatShortDuration(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) return '--';
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(2)}s`;
 }
 
 export function formatDurationFromMs(startMs?: number | null, endMs: number = Date.now()): string {

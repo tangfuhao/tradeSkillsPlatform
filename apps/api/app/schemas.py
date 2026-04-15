@@ -62,6 +62,7 @@ class TraceResponse(BaseModel):
     trigger_time_ms: int
     reasoning_summary: str
     decision: dict[str, Any]
+    execution_timing: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]]
     portfolio_before: dict[str, Any] | None = None
     portfolio_after: dict[str, Any] | None = None

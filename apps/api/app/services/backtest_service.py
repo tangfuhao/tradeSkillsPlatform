@@ -265,6 +265,10 @@ def execute_backtest_job(run_id: str) -> None:
                     )
                     decision["execution_reference"] = fills[-1]["execution_reference"] if fills else "no_execution"
                     decision["fill_count"] = len(fills)
+                    persisted_decision = dict(decision)
+                    execution_timing = agent_response.get("execution_timing")
+                    if isinstance(execution_timing, dict):
+                        persisted_decision["_execution_timing"] = execution_timing
 
                     trace = RunTrace(
                         id=new_id("trace"),
@@ -272,7 +276,7 @@ def execute_backtest_job(run_id: str) -> None:
                         mode="backtest",
                         trace_index=trace_index,
                         trigger_time=trigger_time,
-                        decision_json=decision,
+                        decision_json=persisted_decision,
                         reasoning_summary=agent_response["reasoning_summary"],
                         tool_calls_json=agent_response["tool_calls"],
                     )

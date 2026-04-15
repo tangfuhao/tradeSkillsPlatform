@@ -89,8 +89,24 @@ class ExecutionLifecycleTests(unittest.TestCase):
         response_payload = {
             "decision": {"action": "skip"},
             "reasoning_summary": "Wait for confirmation.",
-            "tool_calls": [],
+            "tool_calls": [
+                {
+                    "tool_name": "scan_market",
+                    "arguments": {"top_n": 8},
+                    "status": "ok",
+                    "execution_timing": {
+                        "started_at_ms": 1704067200100,
+                        "completed_at_ms": 1704067200135,
+                        "duration_ms": 35,
+                    },
+                }
+            ],
             "provider": "mock-runner",
+            "execution_timing": {
+                "started_at_ms": 1704067200000,
+                "completed_at_ms": 1704067200091,
+                "duration_ms": 91,
+            },
         }
 
         with (
@@ -154,6 +170,16 @@ class ExecutionLifecycleTests(unittest.TestCase):
                     db.scalar(select(func.count()).select_from(RunTrace).where(RunTrace.run_id == run_id)),
                     3,
                 )
+                stored_trace = db.scalars(
+                    select(RunTrace).where(RunTrace.run_id == run_id).order_by(RunTrace.trace_index.asc())
+                ).first()
+                self.assertIsNotNone(stored_trace)
+                assert stored_trace is not None
+                self.assertEqual(stored_trace.decision_json["_execution_timing"]["duration_ms"], 91)
+                trace_payload = BacktestService(db).get_traces(run_id)[0]
+                self.assertEqual(trace_payload["execution_timing"]["duration_ms"], 91)
+                self.assertEqual(trace_payload["tool_calls"][0]["execution_timing"]["duration_ms"], 35)
+                self.assertNotIn("_execution_timing", trace_payload["decision"])
 
             with self.session_factory() as db:
                 BacktestService(db).delete_run(run_id)

@@ -11,6 +11,9 @@ from app.services.execution_lifecycle import (
 from app.services.utils import datetime_to_ms
 
 
+TRACE_EXECUTION_TIMING_KEY = "_execution_timing"
+
+
 def skill_to_dict(skill: Skill, *, has_active_live_runtime: bool = False, active_live_task_id: str | None = None) -> dict:
     envelope = skill.envelope_json or {}
     extraction_meta = envelope.get("extraction_meta") if isinstance(envelope, dict) else {}
@@ -69,12 +72,17 @@ def backtest_to_dict(run: BacktestRun) -> dict:
 
 def trace_to_dict(trace: RunTrace) -> dict:
     execution_detail = trace.execution_detail
+    decision = dict(trace.decision_json or {})
+    execution_timing = decision.pop(TRACE_EXECUTION_TIMING_KEY, None)
+    if not isinstance(execution_timing, dict):
+        execution_timing = None
     return {
         "id": trace.id,
         "trace_index": trace.trace_index,
         "trigger_time_ms": datetime_to_ms(trace.trigger_time),
         "reasoning_summary": trace.reasoning_summary,
-        "decision": trace.decision_json or {},
+        "decision": decision,
+        "execution_timing": execution_timing,
         "tool_calls": trace.tool_calls_json or [],
         "portfolio_before": execution_detail.portfolio_before_json if execution_detail else None,
         "portfolio_after": execution_detail.portfolio_after_json if execution_detail else None,

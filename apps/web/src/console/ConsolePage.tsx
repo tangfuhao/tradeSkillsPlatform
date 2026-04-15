@@ -4,6 +4,7 @@ import {
   getDefaultBacktestWindow,
   resolveBacktestLaunchRequest,
 } from '../lib/backtest';
+import { formatPreciseTime, formatShortDuration } from '../lib/formatting';
 import {
   createBacktest,
   createLiveTask,
@@ -935,6 +936,7 @@ export default function ConsolePage() {
                               <span className="status-pill is-neutral">{trace.decision.symbol}</span>
                             ) : null}
                             <span className="status-pill is-neutral">{trace.tool_calls.length} 个工具</span>
+                            <span className="status-pill is-neutral">本轮耗时 {formatShortDuration(trace.execution_timing?.duration_ms)}</span>
                             {simulatedReturn !== null ? (
                               <span className={`status-pill ${simulatedReturn >= 0 ? 'is-ok' : 'is-error'}`}>
                                 {formatPercent(simulatedReturn)}
@@ -967,6 +969,16 @@ export default function ConsolePage() {
                                       {index + 1}. {call.tool_name}
                                     </strong>
                                     <span>{describeStatus(call.status)}</span>
+                                  </div>
+                                  <div className="trace-tool-meta-grid">
+                                    <div className="info-box compact-box">
+                                      <p>实际执行时间</p>
+                                      <strong className="mini-metric">{formatPreciseTime(call.execution_timing?.started_at_ms)}</strong>
+                                    </div>
+                                    <div className="info-box compact-box">
+                                      <p>耗时</p>
+                                      <strong className="mini-metric">{formatShortDuration(call.execution_timing?.duration_ms)}</strong>
+                                    </div>
                                   </div>
                                   <pre className="json-block">{formatJson(call.arguments)}</pre>
                                 </div>

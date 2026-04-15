@@ -45,10 +45,17 @@ class AgentDecision(BaseModel):
     state_patch: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExecutionTiming(BaseModel):
+    started_at_ms: int
+    completed_at_ms: int
+    duration_ms: int
+
+
 class ToolCallSummary(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     status: str = "planned"
+    execution_timing: ExecutionTiming | None = None
 
 
 class ExecuteRunResponse(BaseModel):
@@ -56,6 +63,7 @@ class ExecuteRunResponse(BaseModel):
     reasoning_summary: str
     tool_calls: list[ToolCallSummary]
     provider: str
+    execution_timing: ExecutionTiming | None = None
 
 
 class SkillEnvelopeExtractResponse(BaseModel):

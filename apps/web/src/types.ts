@@ -90,6 +90,12 @@ export type ExecutionProgress = {
   last_processed_trigger_time_ms: number | null;
 };
 
+export type ExecutionTiming = {
+  started_at_ms?: number | null;
+  completed_at_ms?: number | null;
+  duration_ms?: number | null;
+};
+
 export type BacktestRun = {
   id: string;
   skill_id: string;
@@ -113,6 +119,7 @@ export type ToolCall = {
   tool_name: string;
   arguments: Record<string, unknown>;
   status: string;
+  execution_timing?: ExecutionTiming | null;
 };
 
 export type PortfolioAccount = {
@@ -171,6 +178,7 @@ export type BacktestTrace = {
   trigger_time_ms: number;
   reasoning_summary: string;
   decision: Record<string, unknown>;
+  execution_timing?: ExecutionTiming | null;
   tool_calls: ToolCall[];
   portfolio_before?: PortfolioState | null;
   portfolio_after?: PortfolioState | null;

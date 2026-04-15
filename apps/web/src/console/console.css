@@ -107,6 +107,13 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.trace-tool-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .console-list-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -438,7 +445,8 @@
   .insight-grid,
   .trace-summary-strip,
   .meta-strip,
-  .trace-meta-grid {
+  .trace-meta-grid,
+  .trace-tool-meta-grid {
     grid-template-columns: 1fr;
   }
 
@@ -455,6 +463,7 @@
   .meta-strip,
   .trace-summary-strip,
   .trace-meta-grid,
+  .trace-tool-meta-grid,
   .console-list-grid {
     grid-template-columns: 1fr;
   }
