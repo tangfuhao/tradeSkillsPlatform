@@ -8,8 +8,8 @@
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at 100% 0%, rgba(22, 69, 106, 0.08), transparent 28%),
-    radial-gradient(circle at 0% 18%, rgba(15, 118, 110, 0.06), transparent 24%);
+    radial-gradient(circle at 100% 0%, rgba(10, 132, 255, 0.06), transparent 28%),
+    radial-gradient(circle at 0% 18%, rgba(48, 209, 88, 0.04), transparent 24%);
 }
 
 .console-page > * {
@@ -19,8 +19,8 @@
 
 .console-hero {
   background:
-    radial-gradient(circle at top right, rgba(22, 69, 106, 0.12), transparent 28%),
-    linear-gradient(180deg, rgba(247, 250, 253, 0.94), rgba(240, 245, 250, 0.88));
+    radial-gradient(circle at top right, rgba(10, 132, 255, 0.08), transparent 28%),
+    var(--surface-strong);
 }
 
 .console-hero .hero-copy {
@@ -60,13 +60,13 @@
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  border-color: rgba(22, 69, 106, 0.2);
-  background: linear-gradient(180deg, rgba(22, 69, 106, 0.08), rgba(248, 251, 253, 0.9));
+  box-shadow: 0 0 0 0.5px rgba(10, 132, 255, 0.3);
+  background: rgba(10, 132, 255, 0.08);
 }
 
 .console-status-banner.is-loading {
-  border-color: rgba(154, 103, 0, 0.22);
-  background: linear-gradient(180deg, rgba(154, 103, 0, 0.08), rgba(249, 246, 236, 0.92));
+  box-shadow: 0 0 0 0.5px rgba(255, 159, 10, 0.3);
+  background: rgba(255, 159, 10, 0.08);
 }
 
 .console-status-banner strong {
@@ -77,7 +77,7 @@
 
 .console-status-banner p:last-child {
   margin: 0;
-  color: var(--muted);
+  color: var(--text-secondary);
   line-height: 1.55;
 }
 
@@ -121,7 +121,7 @@
 }
 
 .console-editor-surface {
-  background: linear-gradient(180deg, rgba(244, 248, 252, 0.96), rgba(236, 242, 247, 0.92));
+  background: var(--surface-strong);
 }
 
 .console-section-head {
@@ -137,20 +137,21 @@
 }
 
 .console-metric-tile.tone-accent {
-  background: linear-gradient(180deg, rgba(22, 69, 106, 0.08), rgba(245, 248, 252, 0.94));
+  background: rgba(10, 132, 255, 0.08);
 }
 
 .console-metric-tile.tone-warm {
-  background: linear-gradient(180deg, rgba(154, 103, 0, 0.08), rgba(249, 246, 236, 0.94));
+  background: rgba(255, 159, 10, 0.08);
 }
 
 .pulse-card,
 .info-box,
 .list-card,
 .trace-card {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(250, 252, 255, 0.9);
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 0 0 0.5px var(--line);
 }
 
 .pulse-card,
@@ -177,7 +178,7 @@
 .empty-state p,
 .form-footer p,
 .trace-tool-head span {
-  color: var(--muted);
+  color: var(--text-secondary);
 }
 
 .pulse-card strong,
@@ -205,25 +206,25 @@
 }
 
 .pulse-card.tone-ok {
-  border-color: rgba(15, 118, 110, 0.18);
-  background: rgba(15, 118, 110, 0.05);
+  box-shadow: 0 0 0 0.5px rgba(48, 209, 88, 0.3);
+  background: rgba(48, 209, 88, 0.08);
 }
 
 .pulse-card.tone-warn {
-  border-color: rgba(154, 103, 0, 0.18);
-  background: rgba(154, 103, 0, 0.05);
+  box-shadow: 0 0 0 0.5px rgba(255, 159, 10, 0.3);
+  background: rgba(255, 159, 10, 0.08);
 }
 
 .pulse-card.tone-error,
 .warning-box {
-  border-color: rgba(180, 35, 24, 0.18);
-  background: rgba(180, 35, 24, 0.05);
+  box-shadow: 0 0 0 0.5px rgba(255, 69, 58, 0.3);
+  background: rgba(255, 69, 58, 0.08);
 }
 
 .editor-note,
 .hint-box,
 .trace-hint-box {
-  background: rgba(22, 69, 106, 0.04);
+  background: var(--accent-soft);
 }
 
 .skill-status-box p + p,
@@ -246,12 +247,13 @@
   border-width: 0 0 1px;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
   padding: 14px 0;
-  transition: background 150ms ease;
+  transition: background 200ms ease;
 }
 
 .list-card:hover {
-  background: rgba(22, 69, 106, 0.03);
+  background: var(--accent-soft);
 }
 
 .list-card.static {
@@ -259,7 +261,7 @@
 }
 
 .selected-card {
-  background: rgba(22, 69, 106, 0.06);
+  background: rgba(10, 132, 255, 0.1);
 }
 
 .mini-badge {
@@ -307,18 +309,19 @@
 .console-page select {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.94);
+  border-radius: 8px;
+  background: var(--bg-elevated);
   color: var(--text);
   padding: 12px 13px;
-  transition: border-color 150ms ease, outline 150ms ease;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
 .console-page textarea:focus,
 .console-page input:focus,
 .console-page select:focus {
-  outline: 2px solid rgba(15, 76, 129, 0.14);
-  border-color: rgba(15, 76, 129, 0.28);
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .console-page textarea {
@@ -346,7 +349,7 @@
 }
 
 .trace-card {
-  background: rgba(248, 251, 253, 0.9);
+  background: var(--bg-secondary);
 }
 
 .trace-step-label {
@@ -359,38 +362,41 @@
 }
 
 .console-action-pill {
-  color: #f8fbff;
+  color: #ffffff;
 }
 
 .action-open_position {
-  border-color: rgba(15, 118, 110, 0.2);
-  background: #0f766e;
+  box-shadow: 0 0 0 0.5px rgba(48, 209, 88, 0.3);
+  background: #30d158;
+  color: #000;
 }
 
 .action-skip,
 .action-watch,
 .action-hold {
-  border-color: rgba(100, 116, 139, 0.2);
-  background: #64748b;
+  box-shadow: 0 0 0 0.5px rgba(142, 142, 147, 0.3);
+  background: rgba(142, 142, 147, 0.5);
 }
 
 .action-close_position,
 .action-reduce_position {
-  border-color: rgba(154, 103, 0, 0.2);
-  background: #9a6700;
+  box-shadow: 0 0 0 0.5px rgba(255, 159, 10, 0.3);
+  background: #ff9f0a;
+  color: #000;
 }
 
 .trace-details {
   margin-top: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.7);
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: 0 0 0 0.5px var(--line);
   padding: 12px 14px;
 }
 
 .trace-details summary {
   cursor: pointer;
-  color: var(--accent-strong);
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -414,12 +420,13 @@
 .json-block {
   margin: 10px 0 0;
   padding: 14px;
-  border-radius: 6px;
-  background: #102033;
-  color: #f8fbff;
+  border-radius: 8px;
+  background: #000000;
+  color: rgba(235, 235, 245, 0.8);
   overflow: auto;
   font-size: 0.82rem;
   line-height: 1.56;
+  box-shadow: 0 0 0 0.5px var(--line);
 }
 
 @media (max-width: 1120px) {

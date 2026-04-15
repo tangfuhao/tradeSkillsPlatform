@@ -54,7 +54,7 @@ function buildTradeMarkers(candles: MarketCandle[], fills: PortfolioFill[]): Ser
           time: alignFillToBarTime(fill, candles),
           position: isBuy ? 'belowBar' : 'aboveBar',
           shape: isBuy ? 'arrowUp' : 'arrowDown',
-          color: isBuy ? '#55e6ff' : '#ff4fd8',
+          color: isBuy ? '#30d158' : '#ff453a',
           text: isBuy ? 'LONG' : 'SHORT',
           size: 1.5,
         } satisfies SeriesMarker<UTCTimestamp>;
@@ -66,7 +66,7 @@ function buildTradeMarkers(candles: MarketCandle[], fills: PortfolioFill[]): Ser
           time: alignFillToBarTime(fill, candles),
           position: isBuy ? 'belowBar' : 'aboveBar',
           shape: 'square',
-          color: '#ffbe6b',
+          color: '#ff9f0a',
           text: 'REDUCE',
           size: 1.2,
         } satisfies SeriesMarker<UTCTimestamp>;
@@ -77,7 +77,7 @@ function buildTradeMarkers(candles: MarketCandle[], fills: PortfolioFill[]): Ser
         time: alignFillToBarTime(fill, candles),
         position: isBuy ? 'belowBar' : 'aboveBar',
         shape: 'circle',
-        color: '#ffbe6b',
+        color: '#ff9f0a',
         text: 'EXIT',
         size: 1.1,
       } satisfies SeriesMarker<UTCTimestamp>;
@@ -110,33 +110,33 @@ export default function ReplayChart({ candles, fills, loading = false, symbol }:
       height: Math.max(container.clientHeight, 380),
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#cfe2ff',
+        textColor: 'rgba(235, 235, 245, 0.6)',
         attributionLogo: true,
       },
       grid: {
-        vertLines: { color: 'rgba(255, 255, 255, 0.05)', style: LineStyle.Dotted },
-        horzLines: { color: 'rgba(255, 255, 255, 0.05)', style: LineStyle.Dotted },
+        vertLines: { color: 'rgba(84, 84, 88, 0.3)', style: LineStyle.Dotted },
+        horzLines: { color: 'rgba(84, 84, 88, 0.3)', style: LineStyle.Dotted },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: {
-          color: 'rgba(85, 230, 255, 0.4)',
+          color: 'rgba(10, 132, 255, 0.4)',
           style: LineStyle.Dashed,
           width: 1,
-          labelBackgroundColor: '#0f1d39',
+          labelBackgroundColor: '#1c1c1e',
         },
         horzLine: {
-          color: 'rgba(255, 79, 216, 0.28)',
+          color: 'rgba(10, 132, 255, 0.28)',
           style: LineStyle.Dashed,
           width: 1,
-          labelBackgroundColor: '#2a1239',
+          labelBackgroundColor: '#1c1c1e',
         },
       },
       rightPriceScale: {
-        borderColor: 'rgba(85, 230, 255, 0.12)',
+        borderColor: 'rgba(84, 84, 88, 0.55)',
       },
       timeScale: {
-        borderColor: 'rgba(85, 230, 255, 0.12)',
+        borderColor: 'rgba(84, 84, 88, 0.55)',
         timeVisible: true,
         secondsVisible: false,
       },
@@ -155,14 +155,14 @@ export default function ReplayChart({ candles, fills, loading = false, symbol }:
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#55e6ff',
-      downColor: '#ff4fd8',
-      wickUpColor: '#55e6ff',
-      wickDownColor: '#ff4fd8',
+      upColor: '#30d158',
+      downColor: '#ff453a',
+      wickUpColor: '#30d158',
+      wickDownColor: '#ff453a',
       borderVisible: false,
       lastValueVisible: true,
       priceLineVisible: true,
-      priceLineColor: '#3988ff',
+      priceLineColor: '#0a84ff',
     });
 
     candleSeries.setData(chartData);
