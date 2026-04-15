@@ -1,77 +1,75 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
+import LifecycleActions from '../components/LifecycleActions';
+import ProductStatTile from '../components/ProductStatTile';
 import ReplayChart from '../components/ReplayChart';
-import { getBacktest, getBacktestPortfolio, listBacktestTraces, listBacktests, listMarketCandles } from '../api';
+import { controlBacktest, deleteBacktest, getBacktest, getBacktestPortfolio, getSkill, listBacktestTraces, listMarketCandles } from '../api';
 import {
   describeAction,
   describeDirection,
   describeStatus,
   formatCount,
   formatCurrency,
-  formatPercent,
+  formatSignedPercent,
   formatTime,
+  formatWindow,
   getErrorMessage,
-  summarizeDecision,
-  summarizeToolSequence,
+  toneForStatus,
 } from '../lib/formatting';
 import { buildReplaySymbolSlices, summarizeCandleRange } from '../lib/replay';
-import type { BacktestRun, BacktestTrace, MarketCandle, PortfolioState } from '../types';
+import { getProgressLabel, getRunReturnPct, getSkillCadence } from '../lib/product';
+import type { BacktestRun, BacktestTrace, ExecutionAction, MarketCandle, PortfolioState, Skill } from '../types';
 
-function symbolButtonClass(active: boolean): string {
-  return `symbol-chip${active ? ' is-active' : ''}`;
+function progressWidth(run: BacktestRun | null): string {
+  if (!run) return '0%';
+  return `${Math.round((run.progress?.percent ?? 0) * 100)}%`;
 }
 
 export default function ReplayPage() {
   const { runId } = useParams<{ runId: string }>();
-  const [backtests, setBacktests] = useState<BacktestRun[]>([]);
+  const navigate = useNavigate();
   const [run, setRun] = useState<BacktestRun | null>(null);
+  const [skill, setSkill] = useState<Skill | null>(null);
   const [traces, setTraces] = useState<BacktestTrace[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioState | null>(null);
   const [candles, setCandles] = useState<MarketCandle[]>([]);
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('');
+  const [selectedSymbol, setSelectedSymbol] = useState('');
   const [loading, setLoading] = useState(true);
   const [candlesLoading, setCandlesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!runId) return;
+
+    try {
+      const nextRun = await getBacktest(runId);
+      const [nextTraces, nextPortfolio, nextSkill] = await Promise.all([
+        listBacktestTraces(runId),
+        getBacktestPortfolio(runId),
+        getSkill(nextRun.skill_id).catch(() => null),
+      ]);
+
+      setRun(nextRun);
+      setTraces(nextTraces);
+      setPortfolio(nextPortfolio);
+      setSkill(nextSkill);
+      setError(null);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setLoading(false);
+    }
+  }, [runId]);
 
   useEffect(() => {
-    if (!runId) return;
-    const currentRunId = runId;
-
-    let cancelled = false;
-
-    async function load() {
-      setLoading(true);
-      try {
-        const [nextRuns, nextRun, nextTraces, nextPortfolio] = await Promise.all([
-          listBacktests(),
-          getBacktest(currentRunId),
-          listBacktestTraces(currentRunId),
-          getBacktestPortfolio(currentRunId),
-        ]);
-
-        if (cancelled) return;
-        setBacktests(nextRuns);
-        setRun(nextRun);
-        setTraces(nextTraces);
-        setPortfolio(nextPortfolio);
-        setError(null);
-      } catch (nextError) {
-        if (!cancelled) {
-          setError(getErrorMessage(nextError));
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [runId]);
+    void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const symbolSlices = useMemo(() => buildReplaySymbolSlices(traces), [traces]);
 
@@ -80,7 +78,6 @@ export default function ReplayPage() {
       setSelectedSymbol('');
       return;
     }
-
     if (!symbolSlices.some((slice) => slice.symbol === selectedSymbol)) {
       setSelectedSymbol(symbolSlices[0].symbol);
     }
@@ -96,7 +93,7 @@ export default function ReplayPage() {
       setCandles([]);
       return;
     }
-    const endTimeMs = run.end_time_ms;
+    const currentRun = run;
 
     let cancelled = false;
 
@@ -107,7 +104,7 @@ export default function ReplayPage() {
           market_symbol: selectedSlice.symbol,
           timeframe: '15m',
           limit: 120,
-          end_time_ms: endTimeMs,
+          end_time_ms: currentRun.end_time_ms,
         });
         if (!cancelled) {
           setCandles(nextCandles);
@@ -123,218 +120,302 @@ export default function ReplayPage() {
       }
     }
 
-    loadCandles();
+    void loadCandles();
     return () => {
       cancelled = true;
     };
   }, [run, selectedSlice?.symbol]);
 
   const candleSummary = useMemo(() => summarizeCandleRange(candles), [candles]);
-  const returnPct = typeof run?.summary?.total_return_pct === 'number' ? Number(run.summary.total_return_pct) : null;
-  const finalEquity = typeof run?.summary?.final_equity === 'number' ? Number(run.summary.final_equity) : portfolio?.account?.equity ?? null;
-  const selectedFillCount = selectedSlice?.fills.length ?? 0;
+  const returnPct = getRunReturnPct(run);
+  const finalEquity =
+    typeof run?.summary?.final_equity === 'number' ? Number(run.summary.final_equity) : portfolio?.account?.equity ?? null;
+
+  async function handleAction(action: ExecutionAction) {
+    if (!run) return;
+    if (action === 'delete') {
+      const confirmed = window.confirm(`删除回测 ${run.id}？\n\n这会同时删除回测时间线、组合状态和执行明细。`);
+      if (!confirmed) return;
+    }
+    if (action === 'stop') {
+      const confirmed = window.confirm(`停止回测 ${run.id}？\n\n系统会在安全检查点结束本次回测。`);
+      if (!confirmed) return;
+    }
+
+    setPendingAction(action);
+    try {
+      if (action === 'delete') {
+        await deleteBacktest(run.id);
+        navigate('/replays');
+        return;
+      }
+      await controlBacktest(run.id, action);
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  const stats = [
+    {
+      label: '回测进度',
+      value: run ? getProgressLabel(run) : '--',
+      detail: run ? describeStatus(run.status) : '等待 run 数据',
+    },
+    {
+      label: '收益率',
+      value: returnPct == null ? '--' : formatSignedPercent(returnPct),
+      detail: run?.summary?.net_pnl ? `净收益 ${formatCurrency(Number(run.summary.net_pnl))}` : '等待汇总结果',
+    },
+    {
+      label: '当前权益',
+      value: finalEquity == null ? '--' : formatCurrency(finalEquity),
+      detail: portfolio?.account?.last_mark_time_ms ? `更新于 ${formatTime(portfolio.account.last_mark_time_ms)}` : '等待组合快照',
+    },
+    {
+      label: '追踪标的',
+      value: formatCount(symbolSlices.length),
+      detail: selectedSlice ? `当前聚焦 ${selectedSlice.symbol}` : '等待策略开始产生标的上下文',
+    },
+  ];
 
   return (
-    <div className="product-page-stack replay-page-layout">
-      <section className="replay-overview-panel neon-panel">
+    <div className="page-stack">
+      <section className="hero-panel surface">
         <div>
-          <p className="section-kicker">Replay Run</p>
-          <h1 className="page-title">{run?.id ?? runId ?? 'Replay'}</h1>
-          <p className="page-description">
-            从 run 级别进入，再按 symbol 切开；当前页面已经按未来图表叠加做了结构铺垫，下一步就可以把 `lightweight-charts` 接进这个可视化区域。
+          <p className="section-eyebrow">Backtest Detail</p>
+          <h1>{skill?.title ?? run?.id ?? runId ?? '回测详情'}</h1>
+          <p className="hero-copy">
+            当前详情页只服务这一条回测：状态、进度、策略关联、图表、组合结果和决策时间线都围绕当前 run 展开。
           </p>
         </div>
-        <div className="overview-meta-list">
-          <span>{run ? describeStatus(run.status) : loading ? '加载中' : '未找到'}</span>
-          <span>{run ? formatTime(run.updated_at_ms) : '--'}</span>
-          <Link className="inline-link" to="/replays">
-            切换其他回放
-          </Link>
+        <div className="hero-meta">
+          <span className={`status-pill is-${toneForStatus(run?.status)}`}>{describeStatus(run?.status)}</span>
+          <span className="info-pill">{run ? formatWindow(run.start_time_ms, run.end_time_ms) : '--'}</span>
+          {skill ? (
+            <Link className="action-button" to={`/strategies/${skill.id}`}>
+              打开策略档案
+            </Link>
+          ) : null}
         </div>
       </section>
 
-      {error ? <div className="neon-banner neon-banner-error">回放加载失败：{error}</div> : null}
+      <section className="metric-grid">
+        {stats.map((stat) => (
+          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
+        ))}
+      </section>
 
-      <section className="replay-workspace-grid">
-        <aside className="replay-sidebar neon-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Run Selector</p>
-              <h2>最近回放</h2>
-            </div>
+      {error ? <div className="feedback-banner is-error">回测详情加载失败：{error}</div> : null}
+
+      <section className="surface">
+        <div className="section-head">
+          <div>
+            <p className="section-eyebrow">Run Control</p>
+            <h2>当前回测控制</h2>
           </div>
-          <div className="sidebar-run-list">
-            {backtests.map((item) => (
-              <Link className={`sidebar-run-card${item.id === runId ? ' is-active' : ''}`} key={item.id} to={`/replays/${item.id}`}>
-                <strong>{item.id}</strong>
-                <span>{describeStatus(item.status)}</span>
-                <small>{formatTime(item.created_at_ms)}</small>
-              </Link>
-            ))}
+          <div className="action-cluster">
+            <Link className="action-button" to="/replays">
+              返回回测列表
+            </Link>
+            <LifecycleActions
+              actions={run?.available_actions ?? []}
+              disabled={!run || Boolean(pendingAction)}
+              onAction={(action) => void handleAction(action)}
+              pendingAction={pendingAction}
+            />
           </div>
-        </aside>
-
-        <div className="replay-main-stack">
-          <section className="stats-grid replay-stats-grid">
-            <article className="neon-stat-tile">
-              <span>Replay Steps</span>
-              <strong>{formatCount(traces.length)}</strong>
-              <p>当前 run 中已记录的 Agent 触发步数</p>
-            </article>
-            <article className="neon-stat-tile">
-              <span>Total Return</span>
-              <strong>{returnPct == null ? '--' : formatPercent(returnPct)}</strong>
-              <p>汇总层面的 run 表现</p>
-            </article>
-            <article className="neon-stat-tile">
-              <span>Final Equity</span>
-              <strong>{finalEquity == null ? '--' : formatCurrency(finalEquity)}</strong>
-              <p>当前回放结束时的组合权益</p>
-            </article>
-            <article className="neon-stat-tile">
-              <span>Tracked Symbols</span>
-              <strong>{formatCount(symbolSlices.length)}</strong>
-              <p>本次回放中实际发生决策或持仓变化的标的</p>
-            </article>
-          </section>
-
-          <section className="neon-panel">
-            <div className="section-heading-row">
-              <div>
-                <p className="section-kicker">Symbol Slices</p>
-                <h2>按标的切开这条回放</h2>
-              </div>
-              <span className="muted-label">支持频繁轮动多 symbol</span>
-            </div>
-            <div className="symbol-chip-row">
-              {symbolSlices.length ? (
-                symbolSlices.map((slice) => (
-                  <button className={symbolButtonClass(slice.symbol === selectedSlice?.symbol)} key={slice.symbol} type="button" onClick={() => setSelectedSymbol(slice.symbol)}>
-                    <strong>{slice.symbol}</strong>
-                    <span>{slice.tradeCount} fills / {slice.triggerCount} traces</span>
-                  </button>
-                ))
-              ) : (
-                <div className="empty-product-card wide-empty-card">
-                  <strong>{loading ? '正在解构回放...' : '这条回放还没有可识别的 symbol 切片'}</strong>
-                  <p>如果后端 trace 继续沉淀更多符号级细节，这里会自动成长为完整的 symbol theater。</p>
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="visualization-grid">
-            <article className="neon-panel chart-placeholder-panel">
-              <div className="section-heading-row">
-                <div>
-                  <p className="section-kicker">Chart Dock</p>
-                  <h2>{selectedSlice?.symbol ?? '等待选择 symbol'}</h2>
-                </div>
-                <span className="muted-label">Chart-ready region</span>
-              </div>
-              <ReplayChart candles={candles} fills={selectedSlice?.fills ?? []} loading={candlesLoading} symbol={selectedSlice?.symbol} />
-              <div className="chart-footnote-grid">
-                <div className="chart-footnote">
-                  <small>价格区间</small>
-                  <strong>
-                    {candles.length
-                      ? `${candleSummary.low?.toFixed(4)} - ${candleSummary.high?.toFixed(4)}`
-                      : candlesLoading
-                        ? '同步中'
-                        : '--'}
-                  </strong>
-                  <p>
-                    {candles.length
-                      ? `收盘从 ${candleSummary.firstClose?.toFixed(4)} 变化到 ${candleSummary.lastClose?.toFixed(4)}。`
-                      : '图表已接通 candle 数据，缺少样本时会在这里保留空状态。'}
-                  </p>
-                </div>
-                <div className="chart-footnote">
-                  <small>执行标记</small>
-                  <strong>{formatCount(selectedFillCount)}</strong>
-                  <p>青色代表多头入场，洋红代表空头入场，琥珀代表减仓或离场。</p>
-                </div>
-              </div>
-            </article>
-
-            <article className="neon-panel chart-placeholder-panel">
-              <div className="section-heading-row">
-                <div>
-                  <p className="section-kicker">Trade Context</p>
-                  <h2>当前标的动作摘要</h2>
-                </div>
-              </div>
-              {selectedSlice ? (
-                <div className="symbol-summary-card">
-                  <strong>{selectedSlice.symbol}</strong>
-                  <p>
-                    首次触发 {formatTime(selectedSlice.firstTriggerMs)} / 最近触发 {formatTime(selectedSlice.lastTriggerMs)}
-                  </p>
-                  <p>成交 {selectedSlice.tradeCount} 次，涉及 {selectedSlice.positions.length} 条仓位快照。</p>
-                </div>
-              ) : (
-                <div className="empty-product-card wide-empty-card">
-                  <strong>等待 symbol 上下文</strong>
-                  <p>选择某个标的后，这里会展示它的仓位与成交摘要。</p>
-                </div>
-              )}
-            </article>
-          </section>
-
-          <section className="neon-panel">
-            <div className="section-heading-row">
-              <div>
-                <p className="section-kicker">Decision Timeline</p>
-                <h2>标的级 Agent 叙事</h2>
-              </div>
-              <span className="muted-label">先叙事，后 raw trace</span>
-            </div>
-            <div className="timeline-list">
-              {selectedSlice?.traces.length ? (
-                selectedSlice.traces.map((trace) => (
-                  <article className="timeline-card" key={trace.id}>
-                    <div className="timeline-card-head">
-                      <div>
-                        <small>Step {trace.trace_index + 1}</small>
-                        <strong>{formatTime(trace.trigger_time_ms)}</strong>
-                      </div>
-                      <div className="timeline-card-tags">
-                        <span>{describeAction(typeof trace.decision.action === 'string' ? trace.decision.action : 'skip')}</span>
-                        {typeof trace.decision.direction === 'string' ? <span>{describeDirection(trace.decision.direction)}</span> : null}
-                        <span>{trace.tool_calls.length} tools</span>
-                      </div>
-                    </div>
-                    <p>{trace.reasoning_summary || '当前步骤未返回推理摘要。'}</p>
-                    <div className="timeline-card-grid">
-                      <div>
-                        <small>决策摘要</small>
-                        <strong>{summarizeDecision(trace.decision)}</strong>
-                      </div>
-                      <div>
-                        <small>工具序列</small>
-                        <strong>{summarizeToolSequence(trace.tool_calls)}</strong>
-                      </div>
-                    </div>
-                    {trace.fills.length ? (
-                      <div className="fill-pill-row">
-                        {trace.fills.map((fill) => (
-                          <span className="fill-pill" key={fill.id}>
-                            {fill.symbol} / {fill.side} / {fill.quantity.toFixed(4)} @ {fill.price.toFixed(4)}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </article>
-                ))
-              ) : (
-                <div className="empty-product-card wide-empty-card">
-                  <strong>{loading ? '正在读取决策轨迹...' : '当前 symbol 没有可展示的决策时间线'}</strong>
-                  <p>如果这条 run 的动作集中在其他标的，切换 symbol 就能进入另一段 Agent 剧情。</p>
-                </div>
-              )}
-            </div>
-          </section>
         </div>
+        <div className="spec-sheet">
+          <article className="spec-row is-emphasis">
+            <div className="spec-term-block">
+              <span className="spec-term">回测状态</span>
+            </div>
+            <div className="spec-main">
+              <strong>{run ? describeStatus(run.status) : '--'}</strong>
+              <p>{run?.pending_action ? `待执行动作：${run.pending_action}` : '当前没有挂起控制动作。'}</p>
+            </div>
+            <div className="spec-side">
+              <span className="spec-side-label">进度</span>
+              <strong>{run ? getProgressLabel(run) : '--'}</strong>
+              <div className="progress-bar">
+                <span className="progress-fill" style={{ width: progressWidth(run) }} />
+              </div>
+            </div>
+          </article>
+          <article className="spec-row">
+            <div className="spec-term-block">
+              <span className="spec-term">执行窗口</span>
+            </div>
+            <div className="spec-main">
+              <strong>{run ? formatWindow(run.start_time_ms, run.end_time_ms) : '--'}</strong>
+              <p>{skill ? `策略节奏 ${getSkillCadence(skill)}` : '等待策略资料'}</p>
+            </div>
+            <div className="spec-side">
+              <span className="spec-side-label">关联策略</span>
+              <strong>{skill?.title ?? run?.skill_id ?? '--'}</strong>
+              <p>{skill ? '回测详情只追踪当前 run 与其所属策略。' : '策略档案读取中。'}</p>
+            </div>
+          </article>
+          <article className="spec-row">
+            <div className="spec-term-block">
+              <span className="spec-term">异常信息</span>
+            </div>
+            <div className="spec-main">
+              <strong>{run?.error_message ?? '无'}</strong>
+              <p>失败或中断时，这里保留错误文本，便于定位。</p>
+            </div>
+            <div className="spec-side">
+              <span className="spec-side-label">最近活动</span>
+              <strong>{formatTime(run?.last_activity_at_ms ?? run?.updated_at_ms)}</strong>
+              <p>更新时间与最后处理触发点会一起计入。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section className="dual-grid">
+        <section className="surface">
+          <div className="section-head">
+            <div>
+              <p className="section-eyebrow">Chart Region</p>
+              <h2>{selectedSlice?.symbol ?? '等待标的'}</h2>
+            </div>
+            <span className="section-note">成交标记与 K 线在同一画布内查看。</span>
+          </div>
+          <div className="symbol-tabs">
+            {symbolSlices.length ? (
+              symbolSlices.map((slice) => (
+                <button
+                  className={`symbol-tab${slice.symbol === selectedSlice?.symbol ? ' is-active' : ''}`}
+                  key={slice.symbol}
+                  onClick={() => setSelectedSymbol(slice.symbol)}
+                  type="button"
+                >
+                  <strong>{slice.symbol}</strong>
+                  <span>
+                    {slice.tradeCount} fills / {slice.triggerCount} steps
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="empty-state compact-empty">
+                <strong>{loading ? '正在提取标的切片...' : '这条回测还没有形成标的切片'}</strong>
+                <p>一旦 run 产生更多交易动作，这里会自动切换成可按 symbol 浏览的图表工作区。</p>
+              </div>
+            )}
+          </div>
+          <ReplayChart candles={candles} fills={selectedSlice?.fills ?? []} loading={candlesLoading} symbol={selectedSlice?.symbol} />
+          <div className="spec-sheet">
+            <article className="spec-row is-emphasis">
+              <div className="spec-term-block">
+                <span className="spec-term">价格区间</span>
+              </div>
+              <div className="spec-main">
+                <strong>
+                  {candles.length
+                    ? `${candleSummary.low?.toFixed(4)} - ${candleSummary.high?.toFixed(4)}`
+                    : candlesLoading
+                      ? '同步中'
+                      : '--'}
+                </strong>
+                <p>
+                  {candles.length
+                    ? `收盘 ${candleSummary.firstClose?.toFixed(4)} → ${candleSummary.lastClose?.toFixed(4)}`
+                    : '等待 K 线样本。'}
+                </p>
+              </div>
+              <div className="spec-side">
+                <span className="spec-side-label">当前标的动作</span>
+                <strong>{selectedSlice ? formatCount(selectedSlice.tradeCount) : '--'}</strong>
+                <p>{selectedSlice ? `首次触发 ${formatTime(selectedSlice.firstTriggerMs)}` : '等待选择标的。'}</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="surface">
+          <div className="section-head">
+            <div>
+              <p className="section-eyebrow">Run Dossier</p>
+              <h2>当前回测摘要</h2>
+            </div>
+          </div>
+          <div className="spec-sheet">
+            <article className="spec-row is-emphasis">
+              <div className="spec-term-block">
+                <span className="spec-term">策略</span>
+              </div>
+              <div className="spec-main">
+                <strong>{skill?.title ?? run?.skill_id ?? '--'}</strong>
+                <p>{skill ? `节奏 ${getSkillCadence(skill)}` : '读取策略档案中'}</p>
+              </div>
+              <div className="spec-side">
+                <span className="spec-side-label">最终权益</span>
+                <strong>{finalEquity == null ? '--' : formatCurrency(finalEquity)}</strong>
+                <p>{returnPct == null ? '等待结果' : `收益率 ${formatSignedPercent(returnPct)}`}</p>
+              </div>
+            </article>
+            <article className="spec-row">
+              <div className="spec-term-block">
+                <span className="spec-term">持仓数量</span>
+              </div>
+              <div className="spec-main">
+                <strong>{formatCount(portfolio?.positions?.length ?? 0)}</strong>
+                <p>组合快照来自当前回测作用域。</p>
+              </div>
+              <div className="spec-side">
+                <span className="spec-side-label">最近活动</span>
+                <strong>{formatTime(run?.last_activity_at_ms ?? run?.updated_at_ms)}</strong>
+                <p>更新时间与最后处理触发点会一起计入。</p>
+              </div>
+            </article>
+          </div>
+
+          <div className="section-head">
+            <div>
+              <p className="section-eyebrow">Decision Timeline</p>
+              <h2>当前标的时间线</h2>
+            </div>
+          </div>
+          {selectedSlice?.traces.length ? (
+            <div className="timeline-list">
+              {selectedSlice.traces.map((trace) => (
+                <article className="timeline-item" key={trace.id}>
+                  <div className="timeline-head">
+                    <div>
+                      <strong>Step {trace.trace_index + 1}</strong>
+                      <span>{formatTime(trace.trigger_time_ms)}</span>
+                    </div>
+                    <div className="meta-row">
+                      <span className="info-pill">{describeAction(typeof trace.decision.action === 'string' ? trace.decision.action : 'skip')}</span>
+                      {typeof trace.decision.direction === 'string' ? (
+                        <span className="info-pill">{describeDirection(trace.decision.direction)}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <p className="timeline-copy">{trace.reasoning_summary || '当前步骤未返回额外推理摘要。'}</p>
+                  {trace.fills.length ? (
+                    <div className="meta-row">
+                      {trace.fills.map((fill) => (
+                        <span className="info-pill" key={fill.id}>
+                          {fill.symbol} / {fill.side} / {fill.quantity.toFixed(4)}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state compact-empty">
+              <strong>{loading ? '正在读取决策轨迹...' : '当前标的还没有可展示的决策时间线'}</strong>
+              <p>选择其他 symbol，或者等待回测继续推进。</p>
+            </div>
+          )}
+        </section>
       </section>
     </div>
   );

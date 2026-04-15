@@ -1,356 +1,337 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import ProductStatTile from '../components/ProductStatTile';
-import { getMarketOverview, listBacktests, listLiveTasks, listSignals, listSkills } from '../api';
+import StrategyComposer from '../components/StrategyComposer';
+import { getLiveTaskPortfolio, getMarketOverview, listBacktests, listLiveTasks, listSignals, listSkills } from '../api';
 import {
-  countSignalsToday,
-  describeAction,
-  describeDirection,
   describeStatus,
   formatCount,
+  formatDurationFromMs,
+  formatSignedCurrency,
+  formatSignedPercent,
   formatTime,
+  formatWindow,
   getErrorMessage,
+  toneForStatus,
 } from '../lib/formatting';
-import { buildSignalFeed, buildStrategyInsights, getSkillCadence, getStrategyExcerpt } from '../lib/product';
-import type { BacktestRun, LiveSignal, LiveTask, MarketOverview, Skill } from '../types';
+import { buildStrategyInsights, getProgressLabel, getRunReturnPct, getSkillCadence } from '../lib/product';
+import type { BacktestRun, LiveTask, MarketOverview, PortfolioState, Skill } from '../types';
 
-function readTotalReturnText(run: BacktestRun | null): string {
-  if (!run) return '等待第一次回放';
-  const value = run.summary?.total_return_pct;
-  return typeof value === 'number' ? `总收益 ${(Number(value) * 100).toFixed(2)}%` : '等待汇总结果';
+type HomeData = {
+  skills: Skill[];
+  backtests: BacktestRun[];
+  liveTasks: LiveTask[];
+  portfoliosByTaskId: Record<string, PortfolioState>;
+  overview: MarketOverview | null;
+};
+
+function progressWidth(run: BacktestRun): string {
+  return `${Math.max(4, Math.min(100, Math.round((run.progress?.percent ?? 0) * 100)))}%`;
 }
 
 export default function ProductHomePage() {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [backtests, setBacktests] = useState<BacktestRun[]>([]);
-  const [signals, setSignals] = useState<LiveSignal[]>([]);
-  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
-  const [overview, setOverview] = useState<MarketOverview | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<HomeData>({
+    skills: [],
+    backtests: [],
+    liveTasks: [],
+    portfoliosByTaskId: {},
+    overview: null,
+  });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [skills, backtests, signals, liveTasks, overview] = await Promise.all([
+        listSkills(),
+        listBacktests(),
+        listSignals(),
+        listLiveTasks(),
+        getMarketOverview(),
+      ]);
+
+      const trackedTasks = liveTasks.filter((task) => task.status === 'active' || task.status === 'paused');
+      const portfolioEntries = await Promise.all(
+        trackedTasks.map(async (task) => [task.id, await getLiveTaskPortfolio(task.id)] as const),
+      );
+
+      setData({
+        skills,
+        backtests,
+        liveTasks,
+        portfoliosByTaskId: Object.fromEntries(portfolioEntries),
+        overview,
+      });
+      setError(null);
+
+      return { signals };
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+      return { signals: [] };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const [signals, setSignals] = useState<Awaited<ReturnType<typeof listSignals>>>([]);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      try {
-        const [nextSkills, nextBacktests, nextSignals, nextLiveTasks, nextOverview] = await Promise.all([
-          listSkills(),
-          listBacktests(),
-          listSignals(),
-          listLiveTasks(),
-          getMarketOverview(),
-        ]);
-
-        if (cancelled) return;
-        setSkills(nextSkills);
-        setBacktests(nextBacktests);
-        setSignals(nextSignals);
-        setLiveTasks(nextLiveTasks);
-        setOverview(nextOverview);
-        setError(null);
-      } catch (nextError) {
-        if (!cancelled) {
-          setError(getErrorMessage(nextError));
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+    async function refresh() {
+      const result = await load();
+      if (!cancelled) {
+        setSignals(result.signals);
       }
     }
 
-    load();
+    void refresh();
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 15000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
-  }, []);
+  }, [load]);
 
-  const signalFeed = useMemo(() => buildSignalFeed(signals, liveTasks, skills), [liveTasks, signals, skills]);
-  const strategyInsights = useMemo(
-    () => buildStrategyInsights(skills, liveTasks, signals, backtests),
-    [backtests, liveTasks, signals, skills],
+  const insights = useMemo(
+    () =>
+      buildStrategyInsights(data.skills, data.liveTasks, signals, data.backtests, data.portfoliosByTaskId),
+    [data.backtests, data.liveTasks, data.portfoliosByTaskId, data.skills, signals],
   );
 
-  const featuredRun = backtests[0] ?? null;
-  const featuredSignal = signalFeed[0] ?? null;
-  const featuredStrategy = strategyInsights[0] ?? null;
+  const activeLiveInsight = insights.find((insight) => insight.liveTask?.status === 'active' || insight.liveTask?.status === 'paused') ?? null;
+  const recentBacktests = data.backtests.slice(0, 5);
+  const recentStrategies = insights.slice(0, 5);
 
   const stats = useMemo(
     () => [
       {
-        label: 'Replay Runs',
-        value: formatCount(backtests.length),
-        detail: featuredRun ? `Latest run ${featuredRun.id}` : '等待第一次回放',
+        label: '实时策略',
+        value: formatCount(data.liveTasks.filter((task) => task.status === 'active' || task.status === 'paused').length),
+        detail: activeLiveInsight?.skill.title ?? '当前没有实时模拟任务',
       },
       {
-        label: 'Strategies',
-        value: formatCount(skills.length),
-        detail: `${formatCount(skills.filter((skill) => skill.validation_status === 'passed').length)} 个验证通过`,
+        label: '进行中回测',
+        value: formatCount(data.backtests.filter((run) => ['queued', 'running', 'paused', 'stopping'].includes(run.status)).length),
+        detail: recentBacktests[0] ? `最新回测 ${recentBacktests[0].id}` : '等待第一条回测',
       },
       {
-        label: 'Today Signals',
-        value: formatCount(countSignalsToday(signals)),
-        detail: featuredSignal ? `Latest at ${formatTime(featuredSignal.signal.trigger_time_ms)}` : '暂无实时信号',
+        label: '策略库存',
+        value: formatCount(data.skills.length),
+        detail: `${formatCount(data.skills.filter((skill) => skill.validation_status === 'passed').length)} 条可执行策略`,
       },
       {
-        label: 'Active Live Tasks',
-        value: formatCount(liveTasks.filter((task) => task.status === 'active' || task.status === 'running').length),
-        detail: liveTasks.length ? '产品侧已感知到实时执行链路' : '等待首个 live task 进入主界面',
+        label: '历史覆盖',
+        value: formatCount(data.overview?.total_symbols ?? 0),
+        detail: data.overview ? `${data.overview.base_timeframe} 数据底座` : '市场概览读取中',
       },
     ],
-    [backtests.length, featuredRun, featuredSignal, liveTasks, signals, skills],
+    [activeLiveInsight, data.backtests, data.liveTasks, data.overview, data.skills, recentBacktests],
   );
 
-  return (
-    <div className="product-page-stack">
-      <section className="hero-stage">
-        <div className="hero-copy-panel neon-panel">
-          <p className="section-kicker">Direct Product Experience</p>
-          <h1>把 Agent 的交易判断，变成一场可直接进入的雨夜产品。</h1>
-          <p className="hero-description">
-            TradeSkills 现在先把你带进产品现场：先读策略、再看实时信号、最后进入多标的回放剧场。Console 仍保留，但它退回了旁页，专门服务调试与操作。
-          </p>
-          <div className="hero-actions">
-            <Link className="neon-button neon-button-primary" to={featuredRun ? `/replays/${featuredRun.id}` : '/replays'}>
-              {featuredRun ? '进入最新回放' : '进入 Replay Theater'}
-            </Link>
-            <Link className="neon-button neon-button-secondary" to="/signals">
-              打开 Signals Deck
-            </Link>
-          </div>
-        </div>
+  const livePortfolio = activeLiveInsight?.livePortfolio?.account;
+  const liveTask = activeLiveInsight?.liveTask ?? null;
 
-        <div className="hero-side-panel neon-panel neon-panel-accent">
-          <p className="section-kicker">System Pulse</p>
-          <div className="signal-spotlight">
-            <span className="signal-dot" />
-            <div>
-              <strong>{featuredRun ? '最新回放已就绪' : loading ? '正在扫描产品上下文' : '等待第一条回放样本'}</strong>
-              <p>
-                {featuredRun
-                  ? `${describeStatus(featuredRun.status)} / ${formatTime(featuredRun.updated_at_ms)}`
-                  : '等第一条 backtest run 进入后，这里会把用户直接送进产品化回放页面。'}
-              </p>
-            </div>
-          </div>
-          {featuredSignal ? (
-            <div className="mini-signal-card">
-              <small>Latest Signal</small>
-              <strong>{featuredSignal.signal.signal.symbol ?? '未指定标的'}</strong>
-              <p>
-                {describeAction(featuredSignal.signal.signal.action)} / {describeDirection(featuredSignal.signal.signal.direction)}
-              </p>
-            </div>
-          ) : (
-            <div className="mini-signal-card is-muted">
-              <small>Latest Signal</small>
-              <strong>暂无实时动作</strong>
-              <p>等下一条 live signal 进入后，这里会展示方向、时间和对应策略。</p>
-            </div>
-          )}
-          {featuredStrategy ? (
-            <div className="mini-signal-card">
-              <small>Featured Strategy</small>
-              <strong>{featuredStrategy.skill.title}</strong>
-              <p>
-                {getSkillCadence(featuredStrategy.skill)} / {featuredStrategy.recentSymbols.slice(0, 2).join(' / ') || '等待 symbol 上下文'}
-              </p>
-            </div>
-          ) : null}
-          <Link className="inline-link" to="/console">
-            Console 仍保留为旁页调试入口
+  return (
+    <div className="page-stack">
+      <section className="hero-panel surface">
+        <div>
+          <p className="section-eyebrow">Operations Overview</p>
+          <h1>把首页收紧成真正的策略工作台。</h1>
+          <p className="hero-copy">
+            首页只保留四块最高频信息：当前实时模拟、最近回测、最近策略、以及新的策略 Skill 入口。
+          </p>
+        </div>
+        <div className="hero-meta">
+          <span className="info-pill">策略关联：1 条策略 → 多个回测 + 最多 1 个实时运行</span>
+          <span className="info-pill">策略创建后不可编辑</span>
+          <Link className="action-button is-primary" to="/strategies">
+            进入策略管理
           </Link>
         </div>
       </section>
 
-      <section className="stats-grid">
+      <section className="metric-grid">
         {stats.map((stat) => (
-          <ProductStatTile key={stat.label} detail={stat.detail} label={stat.label} value={stat.value} />
+          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
         ))}
       </section>
 
-      {error ? <div className="neon-banner neon-banner-error">数据加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">首页加载失败：{error}</div> : null}
 
-      <section className="destination-grid">
-        <Link className="destination-card" to={featuredRun ? `/replays/${featuredRun.id}` : '/replays'}>
-          <small>Replay Theater</small>
-          <strong>{featuredRun ? featuredRun.id : '先进入回放剧场'}</strong>
-          <p>{featuredRun ? readTotalReturnText(featuredRun) : '从最新一次 run 进入多标的 Agent 交易叙事。'}</p>
-          <div className="tag-row">
-            <span className="meta-chip">{featuredRun ? describeStatus(featuredRun.status) : '等待样本'}</span>
-            <span className="meta-chip">{featuredRun ? formatTime(featuredRun.updated_at_ms) : '由历史回放驱动'}</span>
-          </div>
-        </Link>
-
-        <Link className="destination-card" to="/signals">
-          <small>Signals Deck</small>
-          <strong>实时信号与策略关系</strong>
-          <p>把最新 live signal 组织成带策略上下文的前台 feed，而不只是后台输出记录。</p>
-          <div className="tag-row">
-            <span className="meta-chip">今日 {formatCount(countSignalsToday(signals))} 条</span>
-            <span className="meta-chip">{formatCount(liveTasks.length)} 个任务上下文</span>
-          </div>
-        </Link>
-
-        <Link className="destination-card" to={featuredStrategy ? `/strategies/${featuredStrategy.skill.id}` : '/strategies'}>
-          <small>Strategy Profiles</small>
-          <strong>{featuredStrategy ? featuredStrategy.skill.title : '读懂每条策略在怎么交易'}</strong>
-          <p>{featuredStrategy ? getStrategyExcerpt(featuredStrategy.skill) : '把 cadence、risk、tooling 和最近执行状态整理成用户可读档案。'}</p>
-          <div className="tag-row">
-            <span className="meta-chip">{formatCount(skills.length)} 条策略</span>
-            <span className="meta-chip">{overview ? `${formatCount(overview.total_symbols)} 个市场标的` : '市场概况载入中'}</span>
-          </div>
-        </Link>
-      </section>
-
-      <section className="content-grid two-column">
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Featured Replays</p>
-              <h2>从最新回放，直接进入产品现场</h2>
+      <section className="dashboard-grid">
+        <div className="dashboard-main">
+          <section className="surface emphasis-surface">
+            <div className="section-head">
+              <div>
+                <p className="section-eyebrow">Live Runtime</p>
+                <h2>当前实时策略模拟</h2>
+              </div>
+              <Link className="text-link" to="/signals">
+                打开实时监控
+              </Link>
             </div>
-            <Link className="inline-link" to="/replays">
-              查看全部
-            </Link>
-          </div>
-          <div className="story-list">
-            {backtests.length ? (
-              backtests.slice(0, 4).map((run) => (
-                <Link className="story-card" key={run.id} to={`/replays/${run.id}`}>
+            {activeLiveInsight && liveTask ? (
+              <div className="live-highlight">
+                <div className="live-highlight-header">
                   <div>
-                    <small>{describeStatus(run.status)}</small>
-                    <strong>{run.id}</strong>
+                    <p className="record-title">{activeLiveInsight.skill.title}</p>
+                    <div className="meta-row">
+                      <span className={`status-pill is-${toneForStatus(liveTask.status)}`}>{describeStatus(liveTask.status)}</span>
+                      <span className="info-pill">节奏 {liveTask.cadence}</span>
+                      <span className="info-pill">已运行 {formatDurationFromMs(liveTask.created_at_ms)}</span>
+                    </div>
                   </div>
-                  <p>{readTotalReturnText(run)}</p>
-                  <span>{formatTime(run.created_at_ms)}</span>
-                </Link>
-              ))
+                  <div className="summary-side">
+                    <strong>{formatSignedPercent(livePortfolio?.total_return_pct)}</strong>
+                    <span>模拟总收益</span>
+                  </div>
+                </div>
+                <div className="metric-inline-grid">
+                  <div className="metric-inline">
+                    <span>当前权益</span>
+                    <strong>{formatSignedCurrency(livePortfolio?.equity)}</strong>
+                  </div>
+                  <div className="metric-inline">
+                    <span>已实现收益</span>
+                    <strong>{formatSignedCurrency(livePortfolio?.realized_pnl)}</strong>
+                  </div>
+                  <div className="metric-inline">
+                    <span>未实现收益</span>
+                    <strong>{formatSignedCurrency(livePortfolio?.unrealized_pnl)}</strong>
+                  </div>
+                  <div className="metric-inline">
+                    <span>最后活动</span>
+                    <strong>{formatTime(liveTask.last_activity_at_ms ?? liveTask.last_triggered_at_ms)}</strong>
+                  </div>
+                </div>
+                <div className="split-note">
+                  <span>最近信号 {formatCount(activeLiveInsight.signals.length)} 条</span>
+                  <span>{activeLiveInsight.recentSymbols.length ? activeLiveInsight.recentSymbols.slice(0, 4).join(' / ') : '等待首个交易标的'}</span>
+                </div>
+              </div>
             ) : (
-              <div className="empty-product-card">
-                <strong>还没有回放样本</strong>
-                <p>先去 Console 创建一条 backtest，再回到这里体验回放剧场。</p>
+              <div className="empty-state">
+                <strong>{loading ? '正在扫描实时任务...' : '当前没有正在运行的实时策略'}</strong>
+                <p>去策略页启动一条实时模拟后，这里会显示运行时长、收益、最近活动与策略入口。</p>
               </div>
             )}
-          </div>
-        </article>
+          </section>
 
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Live Pulse</p>
-              <h2>最近的实时信号</h2>
+          <section className="surface">
+            <div className="section-head">
+              <div>
+                <p className="section-eyebrow">Recent Backtests</p>
+                <h2>最近回测</h2>
+              </div>
+              <Link className="text-link" to="/replays">
+                查看全部
+              </Link>
             </div>
-            <Link className="inline-link" to="/signals">
-              打开完整 feed
-            </Link>
-          </div>
-          <div className="story-list">
-            {signalFeed.length ? (
-              signalFeed.slice(0, 4).map((item) => (
-                <article className="story-card static-card signal-feed-card" key={item.signal.id}>
-                  <div>
-                    <small>{describeStatus(item.signal.delivery_status)}</small>
-                    <strong>{item.signal.signal.symbol ?? '未指定标的'}</strong>
-                  </div>
-                  <p>
-                    {describeAction(item.signal.signal.action)} / {describeDirection(item.signal.signal.direction)}
-                  </p>
-                  <span>{formatTime(item.signal.trigger_time_ms)}</span>
-                  <div className="signal-card-footer">
-                    {item.skill ? (
-                      <Link className="inline-link" to={`/strategies/${item.skill.id}`}>
-                        {item.skill.title}
-                      </Link>
-                    ) : (
-                      <span className="muted-label">暂未解析到策略档案</span>
-                    )}
-                  </div>
-                </article>
-              ))
+            {recentBacktests.length ? (
+              <>
+                <div className="table-head compact-ledger-head">
+                  <span>策略 / 回测</span>
+                  <span>状态 / 进度</span>
+                  <span>结果</span>
+                </div>
+                <div className="record-list">
+                  {recentBacktests.map((run) => {
+                  const owner = data.skills.find((skill) => skill.id === run.skill_id) ?? null;
+                  const returnPct = getRunReturnPct(run);
+                  return (
+                    <Link className="record-row" key={run.id} to={`/replays/${run.id}`}>
+                      <div className="record-main compact-record-main">
+                        <div>
+                          <p className="record-title">{owner?.title ?? run.skill_id}</p>
+                          <p className="record-subtitle">{formatWindow(run.start_time_ms, run.end_time_ms)}</p>
+                        </div>
+                        <div className="meta-row">
+                          <span className={`status-pill is-${toneForStatus(run.status)}`}>{describeStatus(run.status)}</span>
+                          <span className="info-pill">{run.pending_action ? `待执行 ${run.pending_action}` : getProgressLabel(run)}</span>
+                          <span className="info-pill">{returnPct == null ? '等待结果' : formatSignedPercent(returnPct)}</span>
+                        </div>
+                      </div>
+                      <div className="progress-shell">
+                        <div className="progress-bar">
+                          <span className="progress-fill" style={{ width: progressWidth(run) }} />
+                        </div>
+                        <span className="record-subtitle">最后活动 {formatTime(run.last_activity_at_ms ?? run.updated_at_ms)}</span>
+                      </div>
+                    </Link>
+                  );
+                  })}
+                </div>
+              </>
             ) : (
-              <div className="empty-product-card">
-                <strong>信号面板待激活</strong>
-                <p>Console 里的 live task 仍然保留，激活后这里会变成产品化展示入口。</p>
+              <div className="empty-state compact-empty">
+                <strong>还没有回测记录</strong>
+                <p>策略页支持一键发起最近 24 小时回测，完成后会立即回到这里。</p>
               </div>
             )}
-          </div>
-        </article>
-      </section>
+          </section>
+        </div>
 
-      <section className="content-grid two-column">
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Strategy Radar</p>
-              <h2>先读懂策略，再进入交易现场</h2>
+        <div className="dashboard-side">
+          <section className="surface">
+            <div className="section-head">
+              <div>
+                <p className="section-eyebrow">Recent Strategies</p>
+                <h2>最近策略</h2>
+              </div>
+              <Link className="text-link" to="/strategies">
+                策略列表
+              </Link>
             </div>
-            <Link className="inline-link" to="/strategies">
-              浏览全部档案
-            </Link>
-          </div>
-          <div className="story-list">
-            {strategyInsights.length ? (
-              strategyInsights.slice(0, 4).map((insight) => (
-                <Link className="story-card" key={insight.skill.id} to={`/strategies/${insight.skill.id}`}>
-                  <div>
-                    <small>{describeStatus(insight.skill.validation_status)}</small>
-                    <strong>{insight.skill.title}</strong>
-                  </div>
-                  <p>{getSkillCadence(insight.skill)} / {formatCount(insight.signals.length)} 条 signal</p>
-                  <span>{insight.recentSymbols.slice(0, 3).join(' / ') || '等待执行上下文'}</span>
-                </Link>
-              ))
+            {recentStrategies.length ? (
+              <>
+                <div className="table-head compact-ledger-head compact-ledger-head-two">
+                  <span>策略</span>
+                  <span>运行摘要</span>
+                </div>
+                <div className="mini-record-list">
+                  {recentStrategies.map((insight) => (
+                  <Link className="mini-record" key={insight.skill.id} to={`/strategies/${insight.skill.id}`}>
+                    <div className="mini-record-head">
+                      <strong>{insight.skill.title}</strong>
+                      <span className={`status-pill is-${toneForStatus(insight.skill.validation_status)}`}>
+                        {describeStatus(insight.skill.validation_status)}
+                      </span>
+                    </div>
+                    <p>{getSkillCadence(insight.skill)}</p>
+                    <div className="meta-row">
+                      <span className="info-pill">{formatCount(insight.completedBacktestCount)} 次完成回测</span>
+                      <span className="info-pill">
+                        {insight.liveTask ? describeStatus(insight.liveTask.status) : '无实时运行'}
+                      </span>
+                    </div>
+                  </Link>
+                  ))}
+                </div>
+              </>
             ) : (
-              <div className="empty-product-card">
-                <strong>策略档案还在形成中</strong>
-                <p>创建 Skill 后，首页会在这里出现可进入的 profile 入口。</p>
+              <div className="empty-state compact-empty">
+                <strong>还没有策略库存</strong>
+                <p>直接在右侧粘贴 Skill，即可创建新的不可编辑策略版本。</p>
               </div>
             )}
-          </div>
-        </article>
+          </section>
 
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Product Map</p>
-              <h2>这套产品逻辑怎么走</h2>
-            </div>
-          </div>
-          <div className="flow-list">
-            <div className="flow-step">
-              <small>01 / Strategy Profiles</small>
-              <strong>先理解策略的节奏、工具和风险边界</strong>
-              <p>从 `/strategies` 开始，用户先建立对策略行为边界的理解，再进入后面的执行流。</p>
-            </div>
-            <div className="flow-step">
-              <small>02 / Signals Deck</small>
-              <strong>再看它最近发出了什么动作</strong>
-              <p>Signals 页负责把 live output 翻译成可读前线，并且连回对应策略档案。</p>
-            </div>
-            <div className="flow-step">
-              <small>03 / Replay Theater</small>
-              <strong>最后进入多标的回放剧场验证它</strong>
-              <p>Replay 页把单次 run 切成多标的剧情，让用户真正看见 Agent 怎么做出交易。</p>
-            </div>
-          </div>
-          <div className="tag-row">
-            <Link className="inline-link" to="/strategies">
-              策略档案
-            </Link>
-            <Link className="inline-link" to="/signals">
-              信号前线
-            </Link>
-            <Link className="inline-link" to="/replays">
-              回放剧场
-            </Link>
-            <Link className="inline-link" to="/console">
-              Console 旁页
-            </Link>
-          </div>
-        </article>
+          <StrategyComposer
+            description="直接在产品首页录入策略 Skill；创建成功后会自动进入策略工作台。"
+            onCreated={() => {
+              setLoading(true);
+              void load().then((result) => setSignals(result.signals));
+            }}
+            submitLabel="立即创建策略"
+            title="直接输入策略 Skill"
+            variant="desk"
+          />
+        </div>
       </section>
     </div>
   );

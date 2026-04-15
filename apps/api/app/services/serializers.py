@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from app.models import BacktestRun, LiveSignal, LiveTask, RunTrace, Skill
+from app.services.execution_lifecycle import (
+    backtest_available_actions,
+    build_progress_payload,
+    last_activity_at_ms,
+    live_runtime_available_actions,
+    strategy_available_actions,
+)
 from app.services.utils import datetime_to_ms
 
 
-def skill_to_dict(skill: Skill) -> dict:
+def skill_to_dict(skill: Skill, *, has_active_live_runtime: bool = False, active_live_task_id: str | None = None) -> dict:
     envelope = skill.envelope_json or {}
     extraction_meta = envelope.get("extraction_meta") if isinstance(envelope, dict) else {}
     extraction_method = str((extraction_meta or {}).get("method") or "rule_only")
@@ -19,6 +26,12 @@ def skill_to_dict(skill: Skill) -> dict:
         "fallback_used": fallback_used,
         "validation_errors": skill.validation_errors_json or [],
         "validation_warnings": skill.validation_warnings_json or [],
+        "immutable": True,
+        "available_actions": strategy_available_actions(
+            validation_status=skill.validation_status,
+            has_active_live_runtime=has_active_live_runtime,
+        ),
+        "active_live_task_id": active_live_task_id,
         "created_at_ms": datetime_to_ms(skill.created_at),
         "updated_at_ms": datetime_to_ms(skill.updated_at),
     }
@@ -34,6 +47,19 @@ def backtest_to_dict(run: BacktestRun) -> dict:
         "start_time_ms": datetime_to_ms(run.start_time),
         "end_time_ms": datetime_to_ms(run.end_time),
         "initial_capital": run.initial_capital,
+        "progress": build_progress_payload(
+            total_steps=run.total_trigger_count,
+            completed_steps=run.completed_trigger_count,
+            last_processed_trace_index=run.last_processed_trace_index,
+            last_processed_trigger_time_ms=run.last_processed_trigger_time_ms,
+        ),
+        "pending_action": run.control_requested,
+        "available_actions": [] if run.control_requested else backtest_available_actions(run.status),
+        "last_activity_at_ms": last_activity_at_ms(
+            run.created_at,
+            run.updated_at,
+            extra_ms=run.last_processed_trigger_time_ms,
+        ),
         "summary": run.summary_json,
         "error_message": run.error_message,
         "created_at_ms": datetime_to_ms(run.created_at),
@@ -57,24 +83,46 @@ def trace_to_dict(trace: RunTrace) -> dict:
 
 
 def live_task_to_dict(task: LiveTask) -> dict:
+    last_triggered_at_ms = datetime_to_ms(task.last_triggered_at) if task.last_triggered_at else None
     return {
         "id": task.id,
         "skill_id": task.skill_id,
         "status": task.status,
         "cadence": task.cadence,
         "cadence_seconds": task.cadence_seconds,
-        "last_triggered_at_ms": datetime_to_ms(task.last_triggered_at) if task.last_triggered_at else None,
+        "available_actions": live_runtime_available_actions(task.status),
+        "last_activity_at_ms": last_activity_at_ms(task.created_at, task.updated_at, extra_ms=last_triggered_at_ms),
+        "last_triggered_at_ms": last_triggered_at_ms,
         "created_at_ms": datetime_to_ms(task.created_at),
         "updated_at_ms": datetime_to_ms(task.updated_at),
     }
 
 
+
 def live_signal_to_dict(signal: LiveSignal) -> dict:
+    raw_signal = signal.signal_json or {}
+    decision = raw_signal.get("decision") if isinstance(raw_signal, dict) else None
+    decision_payload = decision if isinstance(decision, dict) else {}
+    normalized_signal = {
+        **decision_payload,
+        "action": decision_payload.get("action"),
+        "symbol": decision_payload.get("symbol"),
+        "direction": decision_payload.get("direction"),
+        "size_pct": decision_payload.get("size_pct"),
+        "reason": decision_payload.get("reason"),
+        "reasoning_summary": raw_signal.get("reasoning_summary") if isinstance(raw_signal, dict) else None,
+        "provider": raw_signal.get("provider") if isinstance(raw_signal, dict) else None,
+        "error_message": raw_signal.get("error_message") if isinstance(raw_signal, dict) else None,
+        "execution_time_ms": raw_signal.get("execution_time_ms") if isinstance(raw_signal, dict) else None,
+        "portfolio_before": raw_signal.get("portfolio_before") if isinstance(raw_signal, dict) else None,
+        "portfolio_after": raw_signal.get("portfolio_after") if isinstance(raw_signal, dict) else None,
+        "fills": raw_signal.get("fills") if isinstance(raw_signal, dict) else [],
+    }
     return {
         "id": signal.id,
         "live_task_id": signal.live_task_id,
         "trigger_time_ms": datetime_to_ms(signal.trigger_time),
         "delivery_status": signal.delivery_status,
-        "signal": signal.signal_json or {},
+        "signal": normalized_signal,
         "created_at_ms": datetime_to_ms(signal.created_at),
     }

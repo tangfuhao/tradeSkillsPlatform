@@ -1,4 +1,13 @@
 export type SkillRuntimeMode = 'backtest' | 'live_signal' | string;
+export type ExecutionAction =
+  | 'pause'
+  | 'resume'
+  | 'stop'
+  | 'delete'
+  | 'trigger'
+  | 'create_backtest'
+  | 'create_live_task'
+  | string;
 
 export type SkillTrigger = {
   type?: string;
@@ -66,8 +75,19 @@ export type Skill = {
   fallback_used: boolean;
   validation_errors: string[];
   validation_warnings: string[];
+  immutable: boolean;
+  available_actions: ExecutionAction[];
+  active_live_task_id: string | null;
   created_at_ms: number;
   updated_at_ms: number;
+};
+
+export type ExecutionProgress = {
+  total_steps: number;
+  completed_steps: number;
+  percent: number;
+  last_processed_trace_index: number | null;
+  last_processed_trigger_time_ms: number | null;
 };
 
 export type BacktestRun = {
@@ -79,6 +99,10 @@ export type BacktestRun = {
   start_time_ms: number;
   end_time_ms: number;
   initial_capital: number;
+  progress: ExecutionProgress;
+  pending_action: string | null;
+  available_actions: ExecutionAction[];
+  last_activity_at_ms: number | null;
   summary: Record<string, unknown> | null;
   error_message: string | null;
   created_at_ms: number;
@@ -159,6 +183,8 @@ export type LiveTask = {
   status: string;
   cadence: string;
   cadence_seconds: number;
+  available_actions: ExecutionAction[];
+  last_activity_at_ms: number | null;
   last_triggered_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
@@ -179,6 +205,11 @@ export type LiveSignal = {
     reasoning_summary?: string;
     provider?: string;
     error_message?: string;
+    execution_time_ms?: number | null;
+    portfolio_before?: PortfolioState | null;
+    portfolio_after?: PortfolioState | null;
+    fills?: PortfolioFill[];
+    [key: string]: unknown;
   };
 };
 

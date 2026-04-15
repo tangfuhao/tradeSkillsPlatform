@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.runtime.scheduler import scheduler_manager
-from app.schemas import LiveSignalResponse, LiveTaskCreateRequest, LiveTaskResponse, PortfolioStateResponse
-from app.services.live_service import LiveTaskService, execute_live_task
+from app.schemas import ExecutionControlRequest, LiveSignalResponse, LiveTaskCreateRequest, LiveTaskResponse, PortfolioStateResponse
+from app.services.live_service import LiveTaskOwnershipError, LiveTaskService, execute_live_task
 
 
 router = APIRouter(tags=["live"])
@@ -23,6 +23,18 @@ def create_live_task(payload: LiveTaskCreateRequest, db: Session = Depends(get_d
         task = service.create_task(payload.skill_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LiveTaskOwnershipError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "skill_id": exc.skill_id,
+                "existing_live_task_id": exc.existing_task_id,
+                "existing_status": exc.existing_status,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     scheduler_manager.schedule_live_task(task["id"], task["cadence_seconds"])
     return LiveTaskResponse.model_validate(task)
 
@@ -46,5 +58,36 @@ def get_live_task_portfolio(task_id: str, db: Session = Depends(get_db)) -> Port
     service = LiveTaskService(db)
     try:
         return PortfolioStateResponse.model_validate(service.get_portfolio(task_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/live-tasks/{task_id}/control", response_model=LiveTaskResponse)
+def control_live_task(
+    task_id: str,
+    payload: ExecutionControlRequest,
+    db: Session = Depends(get_db),
+) -> LiveTaskResponse:
+    service = LiveTaskService(db)
+    try:
+        task, scheduler_effect = service.control_task(task_id, payload.action)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    if scheduler_effect == "schedule":
+        scheduler_manager.schedule_live_task(task["id"], task["cadence_seconds"])
+    elif scheduler_effect == "unschedule":
+        scheduler_manager.unschedule_live_task(task["id"])
+
+    return LiveTaskResponse.model_validate(task)
+
+
+@router.delete("/live-tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_live_task(task_id: str, db: Session = Depends(get_db)) -> None:
+    service = LiveTaskService(db)
+    try:
+        service.delete_task(task_id)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

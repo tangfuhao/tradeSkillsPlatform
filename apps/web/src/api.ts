@@ -18,9 +18,20 @@ function extractErrorMessage(body: string, status: number): string {
   }
 
   try {
-    const parsed = JSON.parse(body) as { detail?: string | Array<{ msg?: string }> };
+    const parsed = JSON.parse(body) as {
+      detail?: string | { message?: string } | Array<{ msg?: string }>;
+    };
     if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
       return parsed.detail;
+    }
+    if (
+      parsed.detail &&
+      typeof parsed.detail === 'object' &&
+      !Array.isArray(parsed.detail) &&
+      typeof parsed.detail.message === 'string' &&
+      parsed.detail.message.trim()
+    ) {
+      return parsed.detail.message;
     }
     if (Array.isArray(parsed.detail) && parsed.detail.length) {
       return parsed.detail.map((item) => item.msg).filter(Boolean).join('; ');
@@ -44,6 +55,19 @@ async function readJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
     throw new Error(extractErrorMessage(body, response.status));
   }
   return response.json() as Promise<T>;
+}
+
+async function requestVoid(input: RequestInfo, init?: RequestInit): Promise<void> {
+  const response = await fetch(input, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    ...init,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(extractErrorMessage(body, response.status));
+  }
 }
 
 export function getApiBaseUrl(): string {
@@ -100,6 +124,19 @@ export async function createBacktest(payload: { skill_id: string; start_time_ms:
   });
 }
 
+export async function controlBacktest(runId: string, action: string): Promise<BacktestRun> {
+  return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/control`, {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+}
+
+export async function deleteBacktest(runId: string): Promise<void> {
+  return requestVoid(`${apiBaseUrl}/api/v1/backtests/${runId}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function listLiveTasks(): Promise<LiveTask[]> {
   return readJson(`${apiBaseUrl}/api/v1/live-tasks`);
 }
@@ -117,8 +154,36 @@ export async function triggerLiveTask(taskId: string): Promise<LiveSignal> {
   });
 }
 
-export async function listSignals(): Promise<LiveSignal[]> {
-  return readJson(`${apiBaseUrl}/api/v1/live-signals`);
+export async function controlLiveTask(taskId: string, action: string): Promise<LiveTask> {
+  return readJson(`${apiBaseUrl}/api/v1/live-tasks/${taskId}/control`, {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+}
+
+export async function deleteLiveTask(taskId: string): Promise<void> {
+  return requestVoid(`${apiBaseUrl}/api/v1/live-tasks/${taskId}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function getLiveTaskPortfolio(taskId: string): Promise<PortfolioState> {
+  return readJson(`${apiBaseUrl}/api/v1/live-tasks/${taskId}/portfolio`);
+}
+
+export async function listSignals(liveTaskId?: string): Promise<LiveSignal[]> {
+  const search = new URLSearchParams();
+  if (liveTaskId) {
+    search.set('live_task_id', liveTaskId);
+  }
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  return readJson(`${apiBaseUrl}/api/v1/live-signals${suffix}`);
+}
+
+export async function deleteSkill(skillId: string): Promise<void> {
+  return requestVoid(`${apiBaseUrl}/api/v1/skills/${skillId}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function getMarketOverview(): Promise<MarketOverview> {

@@ -1,244 +1,331 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import LifecycleActions from '../components/LifecycleActions';
 import ProductStatTile from '../components/ProductStatTile';
-import { listLiveTasks, listSignals, listSkills } from '../api';
+import { controlLiveTask, deleteLiveTask, getLiveTaskPortfolio, listLiveTasks, listSignals, listSkills, triggerLiveTask } from '../api';
 import {
-  countSignalsToday,
   describeAction,
   describeDirection,
   describeStatus,
   formatCount,
-  formatPercent,
+  formatSignedCurrency,
+  formatSignedPercent,
   formatTime,
   getErrorMessage,
   toneForStatus,
 } from '../lib/formatting';
 import { buildSignalFeed, buildStrategyInsights } from '../lib/product';
-import type { LiveSignal, LiveTask, Skill } from '../types';
+import type { ExecutionAction, LiveSignal, LiveTask, PortfolioState, Skill } from '../types';
+
+type SignalsData = {
+  skills: Skill[];
+  liveTasks: LiveTask[];
+  signals: LiveSignal[];
+  portfoliosByTaskId: Record<string, PortfolioState>;
+};
 
 function signalNarrative(signal: LiveSignal): string {
   return signal.signal.reasoning_summary ?? signal.signal.reason ?? '当前信号没有附带更多说明。';
 }
 
 export default function SignalsPage() {
-  const [signals, setSignals] = useState<LiveSignal[]>([]);
-  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
-  const [skills, setSkills] = useState<Skill[]>([]);
+  const [data, setData] = useState<SignalsData>({
+    skills: [],
+    liveTasks: [],
+    signals: [],
+    portfoliosByTaskId: {},
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback(async () => {
+    try {
+      const [skills, liveTasks, signals] = await Promise.all([
+        listSkills(),
+        listLiveTasks(),
+        listSignals(),
+      ]);
+      const trackedTasks = liveTasks.filter((task) => task.status === 'active' || task.status === 'paused');
+      const portfolioEntries = await Promise.all(
+        trackedTasks.map(async (task) => [task.id, await getLiveTaskPortfolio(task.id)] as const),
+      );
 
-    async function load() {
-      try {
-        const [nextSignals, nextLiveTasks, nextSkills] = await Promise.all([listSignals(), listLiveTasks(), listSkills()]);
-
-        if (cancelled) return;
-        setSignals(nextSignals);
-        setLiveTasks(nextLiveTasks);
-        setSkills(nextSkills);
-        setError(null);
-      } catch (nextError) {
-        if (!cancelled) {
-          setError(getErrorMessage(nextError));
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+      setData({
+        skills,
+        liveTasks,
+        signals,
+        portfoliosByTaskId: Object.fromEntries(portfolioEntries),
+      });
+      setError(null);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setLoading(false);
     }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  const signalFeed = useMemo(() => buildSignalFeed(signals, liveTasks, skills), [signals, liveTasks, skills]);
-  const strategyInsights = useMemo(() => buildStrategyInsights(skills, liveTasks, signals, []), [skills, liveTasks, signals]);
-  const activeStrategies = useMemo(
-    () => strategyInsights.filter((insight) => insight.signals.length > 0).slice(0, 5),
-    [strategyInsights],
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const signalFeed = useMemo(
+    () => buildSignalFeed(data.signals, data.liveTasks, data.skills),
+    [data.liveTasks, data.signals, data.skills],
   );
 
-  const stats = useMemo(() => {
-    const touchedSymbols = new Set(
-      signalFeed
-        .map((item) => item.signal.signal.symbol?.trim())
-        .filter((symbol): symbol is string => Boolean(symbol)),
-    );
-    const resolvedStrategies = new Set(
-      signalFeed
-        .map((item) => item.skill?.id)
-        .filter((skillId): skillId is string => Boolean(skillId)),
-    );
-    const activeLiveTasks = liveTasks.filter((task) => task.status === 'active' || task.status === 'running').length;
+  const insights = useMemo(
+    () => buildStrategyInsights(data.skills, data.liveTasks, data.signals, [], data.portfoliosByTaskId),
+    [data.liveTasks, data.portfoliosByTaskId, data.signals, data.skills],
+  );
 
-    return [
+  const monitoredInsights = insights.filter((insight) => insight.liveTask);
+
+  const stats = useMemo(
+    () => [
       {
-        label: 'Signal Feed',
-        value: formatCount(signalFeed.length),
-        detail: loading ? '正在聚合信号流' : `今日触发 ${formatCount(countSignalsToday(signals))} 条`,
+        label: '监控策略',
+        value: formatCount(monitoredInsights.length),
+        detail: monitoredInsights[0]?.skill.title ?? '等待实时策略',
       },
       {
-        label: 'Resolved Strategies',
-        value: formatCount(resolvedStrategies.size),
-        detail: resolvedStrategies.size ? '大部分信号已连回策略档案' : '等待首批策略关联',
+        label: '实时任务',
+        value: formatCount(data.liveTasks.filter((task) => task.status === 'active' || task.status === 'paused').length),
+        detail: '显示收益、活动时间与信号流',
       },
       {
-        label: 'Active Live Tasks',
-        value: formatCount(activeLiveTasks),
-        detail: activeLiveTasks ? '当前存在持续触发中的任务' : '暂时没有激活中的实时任务',
+        label: '最近信号',
+        value: formatCount(data.signals.length),
+        detail: signalFeed[0] ? `最新 ${formatTime(signalFeed[0].signal.trigger_time_ms)}` : '还没有实时信号',
       },
       {
-        label: 'Symbols In Motion',
-        value: formatCount(touchedSymbols.size),
-        detail: touchedSymbols.size ? '最近信号已覆盖多个标的' : '等下一条信号进入后开始覆盖',
+        label: '触达标的',
+        value: formatCount(new Set(signalFeed.map((item) => item.signal.signal.symbol).filter(Boolean)).size),
+        detail: '按策略聚合而不是平铺日志',
       },
-    ];
-  }, [liveTasks, loading, signalFeed, signals]);
+    ],
+    [data.liveTasks, data.signals.length, monitoredInsights, signalFeed],
+  );
+
+  async function handleRuntimeAction(task: LiveTask, action: ExecutionAction) {
+    if (action === 'delete') {
+      const confirmed = window.confirm(`删除实时运行 ${task.id}？\n\n这会同时删除信号记录与实时组合状态。`);
+      if (!confirmed) return;
+    }
+    if (action === 'stop') {
+      const confirmed = window.confirm(`停止实时运行 ${task.id}？\n\n停止后不会再触发新的模拟信号。`);
+      if (!confirmed) return;
+    }
+
+    const key = `${task.id}:${action}`;
+    setPendingKey(key);
+    try {
+      if (action === 'delete') {
+        await deleteLiveTask(task.id);
+      } else if (action === 'trigger') {
+        await triggerLiveTask(task.id);
+      } else {
+        await controlLiveTask(task.id, action);
+      }
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingKey(null);
+    }
+  }
 
   return (
-    <div className="product-page-stack">
-      <section className="page-header-card neon-panel neon-panel-accent">
-        <p className="section-kicker">Signals Deck</p>
-        <h1 className="page-title">把实时信号从后台日志，升级成一块可浏览的交易前线。</h1>
-        <p className="page-description">
-          这里把 live signal、live task 和 strategy profile 串成一条前台可读链路：先看最新动作，再追到触发它的策略，而不是停留在一条原始记录上。
-        </p>
-        <div className="hero-actions">
-          <Link className="neon-button neon-button-primary" to="/strategies">
-            浏览策略档案
-          </Link>
-          <Link className="neon-button neon-button-secondary" to="/console">
-            打开 Console
+    <div className="page-stack">
+      <section className="hero-panel surface">
+        <div>
+          <p className="section-eyebrow">Live Monitoring</p>
+          <h1>按实时运行中的策略来监控信号与模拟收益。</h1>
+          <p className="hero-copy">
+            每个分组都围绕一条策略展开：运行状态、组合收益、最近信号和控制动作放在一起看，避免再回到平铺日志模式。
+          </p>
+        </div>
+        <div className="hero-meta">
+          <span className="info-pill">支持立即触发 / 暂停 / 继续 / 停止 / 删除</span>
+          <Link className="action-button is-primary" to="/strategies">
+            打开策略面板
           </Link>
         </div>
       </section>
 
-      <section className="stats-grid">
+      <section className="metric-grid">
         {stats.map((stat) => (
-          <ProductStatTile key={stat.label} detail={stat.detail} label={stat.label} value={stat.value} />
+          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
         ))}
       </section>
 
-      {error ? <div className="neon-banner neon-banner-error">Signals 页面加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">实时信号页加载失败：{error}</div> : null}
 
-      <section className="content-grid two-column signals-layout-grid">
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Live Feed</p>
-              <h2>最近的交易动作</h2>
-            </div>
-            <Link className="inline-link" to="/strategies">
-              查看策略目录
-            </Link>
-          </div>
-
-          <div className="story-list">
-            {signalFeed.length ? (
-              signalFeed.map((item) => {
-                const tone = toneForStatus(item.liveTask?.status ?? item.signal.delivery_status);
-                const cadenceLabel = item.liveTask?.cadence ?? item.skill?.envelope.trigger?.value ?? '未解析节奏';
-                const symbolLabel = item.signal.signal.symbol ?? '未指定标的';
-
-                return (
-                  <article className="story-card static-card signal-feed-card" key={item.signal.id}>
-                    <div className="signal-card-head">
-                      <div>
-                        <small>{describeStatus(item.signal.delivery_status)}</small>
-                        <strong>{symbolLabel}</strong>
-                      </div>
-                      <span className={`tone-pill is-${tone}`}>{cadenceLabel}</span>
-                    </div>
-                    <p className="signal-card-summary">
-                      {describeAction(item.signal.signal.action)} / {describeDirection(item.signal.signal.direction)}
-                    </p>
-                    <p>{signalNarrative(item.signal)}</p>
-                    <div className="tag-row">
-                      <span className="meta-chip">{formatTime(item.signal.trigger_time_ms)}</span>
-                      {typeof item.signal.signal.size_pct === 'number' ? (
-                        <span className="meta-chip">仓位 {formatPercent(item.signal.signal.size_pct)}</span>
-                      ) : null}
-                      {item.signal.signal.provider ? <span className="meta-chip">{item.signal.signal.provider}</span> : null}
-                    </div>
-                    <div className="signal-card-footer">
-                      {item.skill ? (
-                        <Link className="inline-link" to={`/strategies/${item.skill.id}`}>
-                          {item.skill.title}
-                        </Link>
-                      ) : (
-                        <span className="muted-label">暂未解析到对应策略</span>
-                      )}
-                      <span className="muted-label">
-                        {item.liveTask ? `任务 ${describeStatus(item.liveTask.status)}` : '等待任务上下文'}
-                      </span>
-                    </div>
-                  </article>
-                );
-              })
-            ) : (
-              <div className="empty-product-card wide-empty-card">
-                <strong>{loading ? '正在连接实时信号流...' : '信号前线暂时安静'}</strong>
-                <p>去 Console 激活实时任务后，这里会形成一条带策略上下文的产品化 signal feed。</p>
-                <Link className="neon-button neon-button-secondary" to="/console">
-                  前往 Console
-                </Link>
+      <section className="dual-grid">
+        <section className="stack-section">
+          {monitoredInsights.length ? (
+            <section className="surface">
+              <div className="section-head">
+                <div>
+                  <p className="section-eyebrow">Runtime Ledger</p>
+                  <h2>实时运行监控台账</h2>
+                </div>
+                <span className="section-note">按策略集中监控实时运行、收益表现和最近信号，不再拆成一组组独立信息卡。</span>
               </div>
-            )}
-          </div>
-        </article>
 
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
+              <div className="table-head monitor-ledger-head">
+                <span>策略</span>
+                <span>运行状态</span>
+                <span>收益表现</span>
+                <span>信号流</span>
+                <span>最后活动</span>
+              </div>
+
+              <div className="record-list">
+                {monitoredInsights.map((insight) => {
+                  const task = insight.liveTask;
+                  if (!task) return null;
+                  const account = insight.livePortfolio?.account;
+                  const recentSignals = insight.signals.slice(0, 4);
+                  const latestSignal = recentSignals[0] ?? null;
+                  return (
+                    <article className="record-row monitor-ledger-row" key={insight.skill.id}>
+                      <div className="monitor-row-main">
+                        <div className="record-cell">
+                          <p className="record-title">{insight.skill.title}</p>
+                          <p className="record-subtitle">
+                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待首个交易标的'}
+                          </p>
+                        </div>
+                        <div className="record-cell">
+                          <span className={`status-pill is-${toneForStatus(task.status)}`}>{describeStatus(task.status)}</span>
+                          <p className="record-subtitle">节奏 {task.cadence}</p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>{formatSignedPercent(account?.total_return_pct)}</strong>
+                          <p className="record-subtitle">
+                            权益 {formatSignedCurrency(account?.equity)} / 已实现 {formatSignedCurrency(account?.realized_pnl)}
+                          </p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>{formatCount(insight.signals.length)} 条</strong>
+                          <p className="record-subtitle">
+                            {latestSignal ? `${latestSignal.signal.symbol ?? '未指定标的'} / ${describeAction(latestSignal.signal.action as string)}` : '当前 runtime 还没有信号样本'}
+                          </p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>{formatTime(task.last_activity_at_ms ?? task.last_triggered_at_ms)}</strong>
+                          <p className="record-subtitle">
+                            未实现 {formatSignedCurrency(account?.unrealized_pnl)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="record-footer">
+                        <div className="action-cluster">
+                          <Link className="action-button" to={`/strategies/${insight.skill.id}`}>
+                            策略档案
+                          </Link>
+                          <LifecycleActions
+                            actions={task.available_actions}
+                            disabled={(pendingKey?.startsWith(`${task.id}:`) ?? false) || loading}
+                            onAction={(action) => void handleRuntimeAction(task, action)}
+                            pendingAction={pendingKey?.startsWith(`${task.id}:`) ? pendingKey.split(':')[1] ?? null : null}
+                          />
+                        </div>
+                      </div>
+
+                      {recentSignals.length ? (
+                        <details className="expander">
+                          <summary>展开查看最近信号</summary>
+                          <div className="timeline-list">
+                            {recentSignals.map((signal) => (
+                              <article className="timeline-item" key={signal.id}>
+                                <div className="timeline-head">
+                                  <div>
+                                    <strong>{signal.signal.symbol ?? '未指定标的'}</strong>
+                                    <span>{formatTime(signal.trigger_time_ms)}</span>
+                                  </div>
+                                  <div className="meta-row">
+                                    <span className="info-pill">{describeAction(signal.signal.action as string)}</span>
+                                    {typeof signal.signal.direction === 'string' ? (
+                                      <span className="info-pill">{describeDirection(signal.signal.direction)}</span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <p className="timeline-copy">{signalNarrative(signal)}</p>
+                              </article>
+                            ))}
+                          </div>
+                        </details>
+                      ) : (
+                        <div className="empty-state compact-empty">
+                          <strong>{loading ? '正在读取信号流...' : '当前 runtime 还没有信号样本'}</strong>
+                          <p>可以使用“立即触发”来验证当前实时策略的信号输出。</p>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ) : (
+            <section className="surface">
+              <div className="empty-state">
+                <strong>{loading ? '正在连接实时运行...' : '当前没有可监控的实时策略'}</strong>
+                <p>去策略页启动实时模拟后，这里会按策略分组展示信号流和收益表现。</p>
+              </div>
+            </section>
+          )}
+        </section>
+
+        <section className="surface">
+          <div className="section-head">
             <div>
-              <p className="section-kicker">Strategy Context</p>
-              <h2>是谁在发出这些信号</h2>
+              <p className="section-eyebrow">Recent Signal Tape</p>
+              <h2>最近信号带</h2>
             </div>
-            <Link className="inline-link" to="/strategies">
-              策略总览
-            </Link>
           </div>
-
-          <div className="story-list">
-            {activeStrategies.length ? (
-              activeStrategies.map((insight) => (
-                <Link className="story-card strategy-context-card" key={insight.skill.id} to={`/strategies/${insight.skill.id}`}>
-                  <div className="signal-card-head">
+          {signalFeed.length ? (
+            <div className="timeline-list">
+              {signalFeed.slice(0, 12).map((item) => (
+                <article className="timeline-item" key={item.signal.id}>
+                  <div className="timeline-head">
                     <div>
-                      <small>{describeStatus(insight.skill.validation_status)}</small>
-                      <strong>{insight.skill.title}</strong>
+                      <strong>{item.signal.signal.symbol ?? '未指定标的'}</strong>
+                      <span>{formatTime(item.signal.trigger_time_ms)}</span>
                     </div>
-                    <span className={`tone-pill is-${toneForStatus(insight.skill.validation_status)}`}>
-                      {insight.skill.envelope.trigger?.value ?? '--'}
+                    <span className={`status-pill is-${toneForStatus(item.liveTask?.status ?? item.signal.delivery_status)}`}>
+                      {describeStatus(item.liveTask?.status ?? item.signal.delivery_status)}
                     </span>
                   </div>
-                  <p>最近信号 {formatCount(insight.signals.length)} 条 / 激活任务 {formatCount(insight.activeTaskCount)} 个</p>
-                  <div className="tag-row">
-                    {insight.recentSymbols.slice(0, 4).map((symbol) => (
-                      <span className="meta-chip" key={symbol}>
-                        {symbol}
-                      </span>
-                    ))}
-                    {!insight.recentSymbols.length ? <span className="meta-chip">等待首个交易标的</span> : null}
+                  <p className="timeline-copy">{signalNarrative(item.signal)}</p>
+                  <div className="meta-row">
+                    <span className="info-pill">{describeAction(item.signal.signal.action as string)}</span>
+                    {typeof item.signal.signal.direction === 'string' ? (
+                      <span className="info-pill">{describeDirection(item.signal.signal.direction)}</span>
+                    ) : null}
+                    {item.skill ? (
+                      <Link className="text-link" to={`/strategies/${item.skill.id}`}>
+                        {item.skill.title}
+                      </Link>
+                    ) : null}
                   </div>
-                  <span className="muted-label">
-                    最近触发 {insight.latestSignal ? formatTime(insight.latestSignal.trigger_time_ms) : '暂无 live signal'}
-                  </span>
-                </Link>
-              ))
-            ) : (
-              <div className="empty-product-card wide-empty-card">
-                <strong>还没有策略进入信号态</strong>
-                <p>Signals 页已经准备好接策略上下文，只等 live task 被激活并开始产出信号。</p>
-              </div>
-            )}
-          </div>
-        </article>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state compact-empty">
+              <strong>还没有实时信号</strong>
+              <p>当实时策略开始运行，这里会保留最新信号带作为快速检视入口。</p>
+            </div>
+          )}
+        </section>
       </section>
     </div>
   );

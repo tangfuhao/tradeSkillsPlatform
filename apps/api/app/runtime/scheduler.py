@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
@@ -49,6 +50,13 @@ class SchedulerManager:
             coalesce=settings.scheduler_coalesce,
             max_instances=1,
         )
+
+    def unschedule_live_task(self, task_id: str) -> None:
+        try:
+            self.scheduler.remove_job(self._job_id(task_id))
+        except JobLookupError:
+            # Ignore missing jobs so delete/stop flows stay idempotent.
+            return
 
     def restore_live_tasks(self) -> None:
         self.start()

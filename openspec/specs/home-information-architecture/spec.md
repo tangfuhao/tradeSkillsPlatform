@@ -4,16 +4,23 @@
 TBD - created by archiving change expand-product-signals-and-strategy-pages. Update Purpose after archive.
 ## Requirements
 ### Requirement: The homepage SHALL guide users into replay, signals, and strategy destinations
-The product homepage SHALL act as a structured hub that points users toward replay exploration, signal monitoring, and strategy discovery.
+The product homepage SHALL act as a structured workbench hub that prioritizes current live performance, recent backtests, recent strategies, and direct strategy entry while still guiding users into deeper replay, signals, and strategy destinations.
 
 #### Scenario: User lands on the homepage
 - **WHEN** a user opens the product homepage
-- **THEN** the page presents distinct sections with clear entry points into replay, signals, and strategy destinations
+- **THEN** the page presents prioritized operational modules with clear entry points into replay exploration, signal monitoring, and strategy management
 
 ### Requirement: Homepage previews SHALL remain summary-level
-The homepage SHALL preview product areas without replacing the need for dedicated deeper routes.
+The homepage SHALL keep live, backtest, and strategy modules at a summary level and SHALL defer full management and detail workflows to their dedicated routes.
 
-#### Scenario: Homepage shows signal or strategy previews
-- **WHEN** the homepage renders signals or strategy summaries
-- **THEN** those previews include navigation controls to the fuller dedicated pages
+#### Scenario: Homepage shows operational previews
+- **WHEN** the homepage renders live, backtest, or strategy summaries
+- **THEN** those modules show only high-value fields and include navigation controls to the fuller dedicated pages
+
+### Requirement: Homepage SHALL provide direct strategy-skill entry
+The homepage SHALL provide a direct input surface for submitting a new strategy skill without requiring the user to enter the operator console first.
+
+#### Scenario: User creates a strategy from the homepage
+- **WHEN** a user enters strategy skill text from the homepage input surface and submits it
+- **THEN** the system creates the strategy through the standard skill-creation flow and updates the product surfaces to include the new strategy
 

@@ -1,0 +1,451 @@
+from __future__ import annotations
+
+import unittest
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+from unittest.mock import MagicMock, call, patch
+
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base
+from app.models import (
+    BacktestRun,
+    ExecutionStrategyState,
+    LiveSignal,
+    LiveTask,
+    PortfolioBook,
+    PortfolioFill,
+    RunTrace,
+    Skill,
+    StrategyState,
+    TraceExecutionDetail,
+)
+from app.runtime.scheduler import SchedulerManager
+from app.services.backtest_service import BacktestService, execute_backtest_job
+from app.services.execution_cleanup import delete_strategy_cascade
+from app.services.execution_lifecycle import (
+    BACKTEST_STATUS_COMPLETED,
+    BACKTEST_STATUS_PAUSED,
+    BACKTEST_STATUS_RUNNING,
+    LIVE_STATUS_ACTIVE,
+    LIVE_STATUS_PAUSED,
+    LIVE_STATUS_STOPPED,
+)
+from app.services.live_service import LiveTaskOwnershipError, LiveTaskService, execute_live_task
+from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, LIVE_SCOPE_KIND
+
+
+class ExecutionLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            future=True,
+        )
+        self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, future=True)
+        Base.metadata.create_all(self.engine)
+
+    def tearDown(self) -> None:
+        Base.metadata.drop_all(self.engine)
+        self.engine.dispose()
+
+    def create_skill(self, *, title: str = "Momentum Skill", cadence: str = "15m") -> Skill:
+        with self.session_factory() as db:
+            skill = Skill(
+                id=self.make_id("skill"),
+                title=title,
+                raw_text=f"# {title}\n\nRun every {cadence}.",
+                source_hash=f"sha256:{uuid4().hex}",
+                validation_status="passed",
+                envelope_json={"trigger": {"value": cadence}},
+                validation_errors_json=[],
+                validation_warnings_json=[],
+            )
+            db.add(skill)
+            db.commit()
+            db.refresh(skill)
+            return skill
+
+    def make_id(self, prefix: str) -> str:
+        return f"{prefix}-{uuid4().hex[:10]}"
+
+    def count_rows(self, model, *criteria) -> int:
+        with self.session_factory() as db:
+            query = select(func.count()).select_from(model)
+            if criteria:
+                query = query.where(*criteria)
+            return int(db.scalar(query) or 0)
+
+    def test_backtest_checkpoint_pause_resume_and_delete_cleanup(self) -> None:
+        skill = self.create_skill(title="Backtest Skill")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=45)
+        trigger_times = [start_time, start_time + timedelta(minutes=15), start_time + timedelta(minutes=30)]
+        response_payload = {
+            "decision": {"action": "skip"},
+            "reasoning_summary": "Wait for confirmation.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                created = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                run_id = created["id"]
+
+            agent_call_count = {"value": 0}
+
+            def pause_after_first_step(_payload):
+                agent_call_count["value"] += 1
+                if agent_call_count["value"] == 1:
+                    with self.session_factory() as other_db:
+                        run = other_db.get(BacktestRun, run_id)
+                        self.assertIsNotNone(run)
+                        run.control_requested = "pause"
+                        other_db.add(run)
+                        other_db.commit()
+                return response_payload
+
+            with patch("app.services.backtest_service.execute_agent_run", side_effect=pause_after_first_step):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                service = BacktestService(db)
+                paused_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(paused_run)
+                self.assertEqual(paused_run.status, BACKTEST_STATUS_PAUSED)
+                self.assertEqual(paused_run.completed_trigger_count, 1)
+                paused_payload = service.get_run(run_id)
+                self.assertEqual(paused_payload["progress"]["completed_steps"], 1)
+                self.assertEqual(paused_payload["progress"]["total_steps"], 3)
+                self.assertEqual(paused_payload["available_actions"], ["resume", "stop", "delete"])
+
+            with self.session_factory() as db:
+                resumed_payload, should_enqueue = BacktestService(db).control_run(run_id, "resume")
+                self.assertTrue(should_enqueue)
+                self.assertEqual(resumed_payload["status"], BACKTEST_STATUS_RUNNING)
+
+            with patch("app.services.backtest_service.execute_agent_run", return_value=response_payload):
+                execute_backtest_job(run_id)
+
+            with self.session_factory() as db:
+                completed_run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(completed_run)
+                self.assertEqual(completed_run.status, BACKTEST_STATUS_COMPLETED)
+                self.assertEqual(completed_run.completed_trigger_count, 3)
+                self.assertIsNotNone(completed_run.summary_json)
+                self.assertEqual(
+                    db.scalar(select(func.count()).select_from(RunTrace).where(RunTrace.run_id == run_id)),
+                    3,
+                )
+
+            with self.session_factory() as db:
+                BacktestService(db).delete_run(run_id)
+                db.commit()
+
+        self.assertEqual(self.count_rows(BacktestRun, BacktestRun.id == run_id), 0)
+        self.assertEqual(self.count_rows(RunTrace, RunTrace.run_id == run_id), 0)
+        self.assertEqual(
+            self.count_rows(
+                PortfolioBook,
+                PortfolioBook.scope_kind == BACKTEST_SCOPE_KIND,
+                PortfolioBook.scope_id == run_id,
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.count_rows(
+                ExecutionStrategyState,
+                ExecutionStrategyState.scope_kind == BACKTEST_SCOPE_KIND,
+                ExecutionStrategyState.scope_id == run_id,
+            ),
+            0,
+        )
+
+    def test_live_runtime_duplicate_activation_controls_signal_serialization_and_cleanup(self) -> None:
+        skill = self.create_skill(title="Live Skill")
+        response_payload = {
+            "decision": {"action": "skip"},
+            "reasoning_summary": "Stay flat.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with self.session_factory() as db:
+            service = LiveTaskService(db)
+            created = service.create_task(skill.id)
+            task_id = created["id"]
+            self.assertEqual(created["status"], LIVE_STATUS_ACTIVE)
+
+        with self.session_factory() as db:
+            with self.assertRaises(LiveTaskOwnershipError) as exc_info:
+                LiveTaskService(db).create_task(skill.id)
+        self.assertEqual(exc_info.exception.existing_task_id, task_id)
+        self.assertEqual(exc_info.exception.skill_id, skill.id)
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch(
+                "app.services.live_service.build_market_snapshot_for_live",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.live_service.execute_agent_run", return_value=response_payload),
+        ):
+            signal = execute_live_task(task_id)
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal["delivery_status"], "stored")
+        self.assertEqual(signal["signal"]["action"], "skip")
+        self.assertIn("portfolio_after", signal["signal"])
+        self.assertEqual(signal["signal"]["fills"], [])
+
+        with self.session_factory() as db:
+            paused_payload, pause_effect = LiveTaskService(db).control_task(task_id, "pause")
+            self.assertEqual(paused_payload["status"], LIVE_STATUS_PAUSED)
+            self.assertEqual(pause_effect, "unschedule")
+
+        with self.session_factory() as db:
+            resumed_payload, resume_effect = LiveTaskService(db).control_task(task_id, "resume")
+            self.assertEqual(resumed_payload["status"], LIVE_STATUS_ACTIVE)
+            self.assertEqual(resume_effect, "schedule")
+
+        with self.session_factory() as db:
+            stopped_payload, stop_effect = LiveTaskService(db).control_task(task_id, "stop")
+            self.assertEqual(stopped_payload["status"], LIVE_STATUS_STOPPED)
+            self.assertEqual(stop_effect, "unschedule")
+
+        with patch("app.services.execution_cleanup.scheduler_manager.unschedule_live_task") as unschedule_mock:
+            with self.session_factory() as db:
+                LiveTaskService(db).delete_task(task_id)
+            unschedule_mock.assert_called_once_with(task_id)
+
+        self.assertEqual(self.count_rows(LiveTask, LiveTask.id == task_id), 0)
+        self.assertEqual(self.count_rows(LiveSignal, LiveSignal.live_task_id == task_id), 0)
+        self.assertEqual(
+            self.count_rows(
+                PortfolioBook,
+                PortfolioBook.scope_kind == LIVE_SCOPE_KIND,
+                PortfolioBook.scope_id == task_id,
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.count_rows(
+                ExecutionStrategyState,
+                ExecutionStrategyState.scope_kind == LIVE_SCOPE_KIND,
+                ExecutionStrategyState.scope_id == task_id,
+            ),
+            0,
+        )
+
+    def test_scheduler_restore_only_reschedules_active_live_tasks(self) -> None:
+        active_skill = self.create_skill(title="Active Skill")
+        paused_skill = self.create_skill(title="Paused Skill")
+        stopped_skill = self.create_skill(title="Stopped Skill")
+
+        with self.session_factory() as db:
+            db.add_all(
+                [
+                    LiveTask(
+                        id=self.make_id("live"),
+                        skill_id=active_skill.id,
+                        status=LIVE_STATUS_ACTIVE,
+                        cadence="15m",
+                        cadence_seconds=900,
+                    ),
+                    LiveTask(
+                        id=self.make_id("live"),
+                        skill_id=paused_skill.id,
+                        status=LIVE_STATUS_PAUSED,
+                        cadence="15m",
+                        cadence_seconds=900,
+                    ),
+                    LiveTask(
+                        id=self.make_id("live"),
+                        skill_id=stopped_skill.id,
+                        status=LIVE_STATUS_STOPPED,
+                        cadence="15m",
+                        cadence_seconds=900,
+                    ),
+                ]
+            )
+            db.commit()
+
+        manager = SchedulerManager()
+        manager.start = MagicMock()
+        manager.schedule_live_task = MagicMock()
+
+        with patch("app.runtime.scheduler.SessionLocal", self.session_factory):
+            manager.restore_live_tasks()
+
+        manager.start.assert_called_once()
+        manager.schedule_live_task.assert_has_calls([call(unittest.mock.ANY, 900)])
+        self.assertEqual(manager.schedule_live_task.call_count, 1)
+
+    def test_delete_strategy_cascade_removes_linked_execution_artifacts(self) -> None:
+        skill = self.create_skill(title="Cascade Skill")
+        run_id = self.make_id("bt")
+        task_id = self.make_id("live")
+        trace_id = self.make_id("trace")
+
+        with self.session_factory() as db:
+            run = BacktestRun(
+                id=run_id,
+                skill_id=skill.id,
+                status=BACKTEST_STATUS_COMPLETED,
+                scope="historical",
+                start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end_time=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+                initial_capital=10_000.0,
+                benchmark_name="mock-benchmark",
+                total_trigger_count=1,
+                completed_trigger_count=1,
+                summary_json={"total_return_pct": 0.02},
+            )
+            trace = RunTrace(
+                id=trace_id,
+                run_id=run.id,
+                mode="backtest",
+                trace_index=0,
+                trigger_time=datetime(2024, 1, 1, 0, 15, tzinfo=timezone.utc),
+                decision_json={"action": "skip"},
+                reasoning_summary="No trade.",
+                tool_calls_json=[],
+            )
+            live_task = LiveTask(
+                id=task_id,
+                skill_id=skill.id,
+                status=LIVE_STATUS_PAUSED,
+                cadence="15m",
+                cadence_seconds=900,
+            )
+            backtest_book = PortfolioBook(
+                id=self.make_id("book"),
+                skill_id=skill.id,
+                scope_kind=BACKTEST_SCOPE_KIND,
+                scope_id=run.id,
+                initial_capital=10_000.0,
+                cash_balance=10_000.0,
+                equity=10_000.0,
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+            )
+            live_book = PortfolioBook(
+                id=self.make_id("book"),
+                skill_id=skill.id,
+                scope_kind=LIVE_SCOPE_KIND,
+                scope_id=live_task.id,
+                initial_capital=10_000.0,
+                cash_balance=10_000.0,
+                equity=10_000.0,
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+            )
+            db.add_all(
+                [
+                    run,
+                    trace,
+                    TraceExecutionDetail(
+                        id=self.make_id("ted"),
+                        trace_id=trace.id,
+                        portfolio_before_json={"account": {"equity": 10_000.0}},
+                        portfolio_after_json={"account": {"equity": 10_000.0}},
+                        fills_json=[],
+                        mark_prices_json={},
+                    ),
+                    live_task,
+                    LiveSignal(
+                        id=self.make_id("sig"),
+                        live_task_id=live_task.id,
+                        trigger_time=datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc),
+                        signal_json={"decision": {"action": "skip"}},
+                        delivery_status="stored",
+                    ),
+                    StrategyState(
+                        id=self.make_id("state"),
+                        skill_id=skill.id,
+                        state_json={"mode": "immutable"},
+                    ),
+                    ExecutionStrategyState(
+                        id=self.make_id("estate"),
+                        skill_id=skill.id,
+                        scope_kind=BACKTEST_SCOPE_KIND,
+                        scope_id=run.id,
+                        state_json={},
+                    ),
+                    ExecutionStrategyState(
+                        id=self.make_id("estate"),
+                        skill_id=skill.id,
+                        scope_kind=LIVE_SCOPE_KIND,
+                        scope_id=live_task.id,
+                        state_json={},
+                    ),
+                    backtest_book,
+                    live_book,
+                    PortfolioFill(
+                        id=self.make_id("fill"),
+                        book_id=backtest_book.id,
+                        market_symbol="BTC-USDT-SWAP",
+                        action="watch",
+                        side="buy",
+                        quantity=0.0,
+                        price=0.0,
+                        notional=0.0,
+                        realized_pnl=0.0,
+                        trigger_time_ms=1,
+                        trace_index=0,
+                        execution_reference="portfolio_book_fill",
+                    ),
+                    PortfolioFill(
+                        id=self.make_id("fill"),
+                        book_id=live_book.id,
+                        market_symbol="BTC-USDT-SWAP",
+                        action="watch",
+                        side="buy",
+                        quantity=0.0,
+                        price=0.0,
+                        notional=0.0,
+                        realized_pnl=0.0,
+                        trigger_time_ms=2,
+                        trace_index=None,
+                        execution_reference="portfolio_book_fill",
+                    ),
+                ]
+            )
+            db.commit()
+
+            stored_skill = db.get(Skill, skill.id)
+            self.assertIsNotNone(stored_skill)
+            with patch("app.services.execution_cleanup.scheduler_manager.unschedule_live_task") as unschedule_mock:
+                delete_strategy_cascade(db, stored_skill)
+                db.commit()
+                unschedule_mock.assert_called_once_with(task_id)
+
+        self.assertEqual(self.count_rows(Skill, Skill.id == skill.id), 0)
+        self.assertEqual(self.count_rows(BacktestRun, BacktestRun.skill_id == skill.id), 0)
+        self.assertEqual(self.count_rows(RunTrace, RunTrace.run_id == run_id), 0)
+        self.assertEqual(self.count_rows(TraceExecutionDetail, TraceExecutionDetail.trace_id == trace_id), 0)
+        self.assertEqual(self.count_rows(LiveTask, LiveTask.skill_id == skill.id), 0)
+        self.assertEqual(self.count_rows(LiveSignal, LiveSignal.live_task_id == task_id), 0)
+        self.assertEqual(self.count_rows(PortfolioBook, PortfolioBook.skill_id == skill.id), 0)
+        self.assertEqual(self.count_rows(ExecutionStrategyState, ExecutionStrategyState.skill_id == skill.id), 0)
+        self.assertEqual(self.count_rows(StrategyState, StrategyState.skill_id == skill.id), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

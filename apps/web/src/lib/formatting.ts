@@ -7,6 +7,9 @@ const generalStatusLabels: Record<string, string> = {
   healthy: '正常',
   queued: '排队中',
   running: '运行中',
+  paused: '已暂停',
+  stopping: '停止中',
+  stopped: '已停止',
   completed: '已完成',
   failed: '失败',
   active: '已激活',
@@ -86,12 +89,24 @@ export function formatPercent(value?: number | null): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+export function formatSignedPercent(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
+  const prefix = value > 0 ? '+' : '';
+  return `${prefix}${(value * 100).toFixed(2)}%`;
+}
+
 export function formatCurrency(value?: number | null): string {
   if (typeof value !== 'number' || Number.isNaN(value)) return '--';
   return new Intl.NumberFormat(LOCALE, {
     maximumFractionDigits: 2,
     minimumFractionDigits: 2,
   }).format(value);
+}
+
+export function formatSignedCurrency(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '--';
+  const prefix = value > 0 ? '+' : '';
+  return `${prefix}${formatCurrency(value)}`;
 }
 
 export function describeStatus(status?: string | null): string {
@@ -136,7 +151,7 @@ export function formatJson(value: unknown): string {
 }
 
 export function isBacktestActive(status?: string): boolean {
-  return status === 'queued' || status === 'running';
+  return status === 'queued' || status === 'running' || status === 'stopping';
 }
 
 export function countSignalsToday(signals: LiveSignal[]): number {
@@ -168,12 +183,40 @@ export function getDefaultBacktestWindow(overview: MarketOverview | null): { sta
   };
 }
 
+export function getDefaultBacktestWindowMs(
+  overview: MarketOverview | null,
+): { startTimeMs: number; endTimeMs: number } | null {
+  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
+  const startTimeMs = Math.max(overview.coverage_start_ms, overview.coverage_end_ms - 24 * 60 * 60 * 1000);
+  if (startTimeMs >= overview.coverage_end_ms) return null;
+  return {
+    startTimeMs,
+    endTimeMs: overview.coverage_end_ms,
+  };
+}
+
+export function formatDurationFromMs(startMs?: number | null, endMs: number = Date.now()): string {
+  if (typeof startMs !== 'number' || Number.isNaN(startMs) || endMs <= startMs) return '--';
+  const totalMinutes = Math.floor((endMs - startMs) / 60_000);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}天 ${hours}小时`;
+  if (hours > 0) return `${hours}小时 ${minutes}分`;
+  return `${minutes}分`;
+}
+
+export function formatWindow(startMs?: number | null, endMs?: number | null): string {
+  if (typeof startMs !== 'number' || typeof endMs !== 'number') return '--';
+  return `${formatTime(startMs)} - ${formatTime(endMs)}`;
+}
+
 export function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutral' {
   if (!status) return 'neutral';
   if (['ok', 'healthy', 'completed', 'active', 'stored', 'passed'].includes(status)) {
     return 'ok';
   }
-  if (['queued', 'running', 'pending', 'skipped'].includes(status)) {
+  if (['queued', 'running', 'pending', 'skipped', 'paused', 'stopping', 'stopped'].includes(status)) {
     return 'warn';
   }
   if (['failed', 'validation_failed', 'degraded'].includes(status)) {

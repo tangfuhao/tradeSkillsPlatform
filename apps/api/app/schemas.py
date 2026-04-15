@@ -12,6 +12,18 @@ class SkillCreateRequest(BaseModel):
     skill_text: str = Field(min_length=20)
 
 
+class ExecutionProgressResponse(BaseModel):
+    total_steps: int = 0
+    completed_steps: int = 0
+    percent: float = 0.0
+    last_processed_trace_index: int | None = None
+    last_processed_trigger_time_ms: int | None = None
+
+
+class ExecutionControlRequest(BaseModel):
+    action: str = Field(min_length=1)
+
+
 class SkillResponse(BaseModel):
     id: str
     title: str
@@ -22,6 +34,9 @@ class SkillResponse(BaseModel):
     fallback_used: bool = False
     validation_errors: list[str]
     validation_warnings: list[str]
+    immutable: bool = True
+    available_actions: list[str] = Field(default_factory=list)
+    active_live_task_id: str | None = None
     created_at_ms: int
     updated_at_ms: int
 
@@ -62,6 +77,10 @@ class BacktestResponse(BaseModel):
     start_time_ms: int
     end_time_ms: int
     initial_capital: float
+    progress: ExecutionProgressResponse = Field(default_factory=ExecutionProgressResponse)
+    pending_action: str | None = None
+    available_actions: list[str] = Field(default_factory=list)
+    last_activity_at_ms: int | None = None
     summary: dict[str, Any] | None
     error_message: str | None
     created_at_ms: int
@@ -78,6 +97,8 @@ class LiveTaskResponse(BaseModel):
     status: str
     cadence: str
     cadence_seconds: int
+    available_actions: list[str] = Field(default_factory=list)
+    last_activity_at_ms: int | None = None
     last_triggered_at_ms: int | None
     created_at_ms: int
     updated_at_ms: int

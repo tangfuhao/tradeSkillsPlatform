@@ -2,6 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -12,6 +13,34 @@ from app.services.utils import datetime_to_ms, utc_now
 
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_runtime_schema() -> None:
+    inspector = inspect(engine)
+    if "backtest_runs" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("backtest_runs")}
+    statements: list[str] = []
+
+    if "total_trigger_count" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN total_trigger_count INTEGER NOT NULL DEFAULT 0")
+    if "completed_trigger_count" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN completed_trigger_count INTEGER NOT NULL DEFAULT 0")
+    if "control_requested" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN control_requested VARCHAR(32)")
+    if "last_processed_trace_index" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trace_index INTEGER")
+    if "last_processed_trigger_time_ms" not in existing_columns:
+        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trigger_time_ms BIGINT")
+
+    if not statements:
+        return
+
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+    logger.info("Applied runtime schema bootstrap statements: %s", len(statements))
 
 
 def create_app() -> FastAPI:
@@ -27,6 +56,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def on_startup() -> None:
         Base.metadata.create_all(bind=engine)
+        ensure_runtime_schema()
         if settings.startup_sync_blocking:
             with SessionLocal() as db:
                 try:

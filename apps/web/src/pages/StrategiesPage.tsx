@@ -1,257 +1,472 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import LifecycleActions from '../components/LifecycleActions';
 import ProductStatTile from '../components/ProductStatTile';
-import { listBacktests, listLiveTasks, listSignals, listSkills } from '../api';
+import StrategyComposer from '../components/StrategyComposer';
 import {
-  describeExtractionMethod,
+  controlBacktest,
+  controlLiveTask,
+  createBacktest,
+  createLiveTask,
+  deleteBacktest,
+  deleteSkill,
+  getLiveTaskPortfolio,
+  getMarketOverview,
+  listBacktests,
+  listLiveTasks,
+  listSignals,
+  listSkills,
+  triggerLiveTask,
+} from '../api';
+import {
   describeStatus,
   formatCount,
-  formatPercent,
+  formatSignedCurrency,
+  formatSignedPercent,
   formatTime,
+  formatWindow,
+  getDefaultBacktestWindowMs,
   getErrorMessage,
   toneForStatus,
 } from '../lib/formatting';
-import { buildStrategyInsights, getSkillCadence, getStrategyExcerpt } from '../lib/product';
-import type { BacktestRun, LiveSignal, LiveTask, Skill } from '../types';
+import { buildStrategyInsights, getProgressLabel, getRunReturnPct, getSkillCadence, getStrategyExcerpt } from '../lib/product';
+import type { BacktestRun, ExecutionAction, LiveTask, MarketOverview, PortfolioState, Skill } from '../types';
 
-function readTotalReturnPct(run: BacktestRun | null): number | null {
-  if (!run) return null;
-  const value = run.summary?.total_return_pct;
-  return typeof value === 'number' ? Number(value) : null;
-}
+type StrategiesData = {
+  skills: Skill[];
+  liveTasks: LiveTask[];
+  portfoliosByTaskId: Record<string, PortfolioState>;
+  overview: MarketOverview | null;
+};
 
 export default function StrategiesPage() {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
-  const [signals, setSignals] = useState<LiveSignal[]>([]);
-  const [backtests, setBacktests] = useState<BacktestRun[]>([]);
+  const [data, setData] = useState<StrategiesData>({
+    skills: [],
+    liveTasks: [],
+    portfoliosByTaskId: {},
+    overview: null,
+  });
+  const [signals, setSignals] = useState<Awaited<ReturnType<typeof listSignals>>>([]);
+  const [backtests, setBacktests] = useState<Awaited<ReturnType<typeof listBacktests>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback(async () => {
+    try {
+      const [skills, liveTasks, signalsResult, backtestsResult, overview] = await Promise.all([
+        listSkills(),
+        listLiveTasks(),
+        listSignals(),
+        listBacktests(),
+        getMarketOverview(),
+      ]);
 
-    async function load() {
-      try {
-        const [nextSkills, nextLiveTasks, nextSignals, nextBacktests] = await Promise.all([
-          listSkills(),
-          listLiveTasks(),
-          listSignals(),
-          listBacktests(),
-        ]);
+      const trackedTasks = liveTasks.filter((task) => task.status === 'active' || task.status === 'paused');
+      const portfolioEntries = await Promise.all(
+        trackedTasks.map(async (task) => [task.id, await getLiveTaskPortfolio(task.id)] as const),
+      );
 
-        if (cancelled) return;
-        setSkills(nextSkills);
-        setLiveTasks(nextLiveTasks);
-        setSignals(nextSignals);
-        setBacktests(nextBacktests);
-        setError(null);
-      } catch (nextError) {
-        if (!cancelled) {
-          setError(getErrorMessage(nextError));
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+      setData({
+        skills,
+        liveTasks,
+        portfoliosByTaskId: Object.fromEntries(portfolioEntries),
+        overview,
+      });
+      setSignals(signalsResult);
+      setBacktests(backtestsResult);
+      setError(null);
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setLoading(false);
     }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  const strategyInsights = useMemo(
-    () => buildStrategyInsights(skills, liveTasks, signals, backtests),
-    [backtests, liveTasks, signals, skills],
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const insights = useMemo(
+    () => buildStrategyInsights(data.skills, data.liveTasks, signals, backtests, data.portfoliosByTaskId),
+    [backtests, data.liveTasks, data.portfoliosByTaskId, data.skills, signals],
   );
-  const featuredStrategy = strategyInsights[0] ?? null;
 
-  const stats = useMemo(() => {
-    const validatedCount = strategyInsights.filter((insight) => insight.skill.validation_status === 'passed').length;
-    const liveLinkedCount = strategyInsights.filter((insight) => insight.liveTasks.length > 0).length;
-    const replayLinkedCount = strategyInsights.filter((insight) => insight.backtests.length > 0).length;
+  const defaultBacktestWindow = getDefaultBacktestWindowMs(data.overview);
 
-    return [
+  const stats = useMemo(
+    () => [
       {
-        label: 'Strategies',
-        value: formatCount(strategyInsights.length),
-        detail: loading ? '正在读取策略目录' : '产品侧可浏览的策略版本数',
+        label: '策略总数',
+        value: formatCount(insights.length),
+        detail: '策略创建后不可编辑，只能派生新版本',
       },
       {
-        label: 'Validated',
-        value: formatCount(validatedCount),
-        detail: validatedCount ? '已通过验证的策略可以直接进入体验流' : '等待第一条验证通过的策略',
+        label: '实时持有',
+        value: formatCount(insights.filter((insight) => insight.liveTask?.status === 'active' || insight.liveTask?.status === 'paused').length),
+        detail: '每条策略最多一个实时运行',
       },
       {
-        label: 'Live-linked',
-        value: formatCount(liveLinkedCount),
-        detail: liveLinkedCount ? '这些策略已经进入实时信号链路' : '还没有策略连上实时任务',
+        label: '已完成回测',
+        value: formatCount(backtests.filter((run) => run.status === 'completed').length),
+        detail: '回测与实时都锚定到策略实体',
       },
       {
-        label: 'Replay-linked',
-        value: formatCount(replayLinkedCount),
-        detail: replayLinkedCount ? '已有策略沉淀出历史回放样本' : '回放样本还在形成中',
+        label: '近 24h 窗口',
+        value: defaultBacktestWindow ? formatTime(defaultBacktestWindow.endTimeMs) : '--',
+        detail: defaultBacktestWindow ? '一键回测默认使用最近 24 小时' : '等待市场数据覆盖窗口',
       },
-    ];
-  }, [loading, strategyInsights]);
+    ],
+    [backtests, defaultBacktestWindow, insights],
+  );
+
+  async function handleStrategyAction(skill: Skill, action: ExecutionAction) {
+    const key = `${skill.id}:${action}`;
+    if (action === 'delete') {
+      const confirmed = window.confirm(
+        `删除策略 ${skill.title}？\n\n这会级联删除该策略关联的所有回测、实时运行、信号和组合状态。`,
+      );
+      if (!confirmed) return;
+    }
+    if (action === 'create_backtest') {
+      if (!defaultBacktestWindow) {
+        setError('当前没有足够的历史行情覆盖范围，无法发起默认回测。');
+        return;
+      }
+      const confirmed = window.confirm(
+        `为策略 ${skill.title} 发起最近 24 小时回测？\n\n窗口：${formatWindow(
+          defaultBacktestWindow.startTimeMs,
+          defaultBacktestWindow.endTimeMs,
+        )}`,
+      );
+      if (!confirmed) return;
+    }
+
+    setPendingKey(key);
+    try {
+      if (action === 'create_backtest' && defaultBacktestWindow) {
+        await createBacktest({
+          skill_id: skill.id,
+          start_time_ms: defaultBacktestWindow.startTimeMs,
+          end_time_ms: defaultBacktestWindow.endTimeMs,
+          initial_capital: 10_000,
+        });
+      } else if (action === 'create_live_task') {
+        await createLiveTask({ skill_id: skill.id });
+      } else if (action === 'delete') {
+        await deleteSkill(skill.id);
+      }
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingKey(null);
+    }
+  }
+
+  async function handleLiveAction(task: LiveTask, action: ExecutionAction) {
+    const key = `${task.id}:${action}`;
+    if (action === 'stop') {
+      const confirmed = window.confirm(`停止实时运行 ${task.id}？\n\n这会中断后续触发，但不会删除已有信号。`);
+      if (!confirmed) return;
+    }
+    setPendingKey(key);
+    try {
+      if (action === 'trigger') {
+        await triggerLiveTask(task.id);
+      } else {
+        await controlLiveTask(task.id, action);
+      }
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingKey(null);
+    }
+  }
+
+  async function handleBacktestAction(run: BacktestRun, action: ExecutionAction) {
+    const key = `${run.id}:${action}`;
+    if (action === 'delete') {
+      const confirmed = window.confirm(`删除回测 ${run.id}？\n\n这会删除该回测的 traces 与组合状态。`);
+      if (!confirmed) return;
+    }
+    if (action === 'stop') {
+      const confirmed = window.confirm(`停止回测 ${run.id}？\n\n系统会在安全检查点结束当前回测。`);
+      if (!confirmed) return;
+    }
+
+    setPendingKey(key);
+    try {
+      if (action === 'delete') {
+        await deleteBacktest(run.id);
+      } else {
+        await controlBacktest(run.id, action);
+      }
+      await load();
+    } catch (nextError) {
+      setError(getErrorMessage(nextError));
+    } finally {
+      setPendingKey(null);
+    }
+  }
 
   return (
-    <div className="product-page-stack">
-      <section className="page-header-card neon-panel">
-        <p className="section-kicker">Strategy Library</p>
-        <h1 className="page-title">让 Skill 不再只是记录，而是可理解、可追踪、可进入的策略档案。</h1>
-        <p className="page-description">
-          策略页把 cadence、validation、risk、tooling 和最近执行上下文翻译成产品可读语言。用户先读懂策略，再进入信号与回放，而不是先看一堆 envelope 字段。
-        </p>
-        <div className="hero-actions">
-          <Link className="neon-button neon-button-primary" to={featuredStrategy ? `/strategies/${featuredStrategy.skill.id}` : '/console'}>
-            {featuredStrategy ? '打开焦点策略' : '先去创建策略'}
-          </Link>
-          <Link className="neon-button neon-button-secondary" to="/signals">
-            查看实时信号
-          </Link>
+    <div className="page-stack">
+      <section className="hero-panel surface">
+        <div>
+          <p className="section-eyebrow">Strategy Operations</p>
+          <h1>把策略页变成真正的管理面，而不是纯展示目录。</h1>
+          <p className="hero-copy">
+            这里围绕策略本体进行管理：创建不可编辑策略、发起回测、启动或停止实时运行、以及执行级联删除。
+          </p>
+        </div>
+        <div className="hero-meta">
+          <span className="info-pill">删除策略会同时删除所有回测与实时运行</span>
+          <span className="info-pill">策略本体只读，修改请创建新版本</span>
         </div>
       </section>
 
-      <section className="stats-grid">
+      <section className="metric-grid">
         {stats.map((stat) => (
-          <ProductStatTile key={stat.label} detail={stat.detail} label={stat.label} value={stat.value} />
+          <ProductStatTile detail={stat.detail} key={stat.label} label={stat.label} value={stat.value} />
         ))}
       </section>
 
-      {error ? <div className="neon-banner neon-banner-error">Strategies 页面加载失败：{error}</div> : null}
+      {error ? <div className="feedback-banner is-error">策略页加载失败：{error}</div> : null}
 
-      <section className="content-grid two-column strategies-hero-grid">
-        <article className="neon-panel neon-panel-accent feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Featured Profile</p>
-              <h2>{featuredStrategy?.skill.title ?? '等待首个策略档案'}</h2>
-            </div>
-            {featuredStrategy ? (
-              <Link className="inline-link" to={`/strategies/${featuredStrategy.skill.id}`}>
-                进入档案
-              </Link>
-            ) : null}
-          </div>
+      <section className="management-grid">
+        <section className="stack-section">
+          {insights.length ? (
+            <section className="surface">
+              <div className="section-head">
+                <div>
+                  <p className="section-eyebrow">Strategy Ledger</p>
+                  <h2>策略管理台账</h2>
+                </div>
+                <span className="section-note">以策略为锚点查看实时运行、回测和可执行动作，不再拆成大量独立卡片。</span>
+              </div>
 
-          {featuredStrategy ? (
-            <>
-              <p>{getStrategyExcerpt(featuredStrategy.skill)}</p>
-              <div className="tag-row">
-                <span className={`tone-pill is-${toneForStatus(featuredStrategy.skill.validation_status)}`}>
-                  {describeStatus(featuredStrategy.skill.validation_status)}
-                </span>
-                <span className="meta-chip">节奏 {getSkillCadence(featuredStrategy.skill)}</span>
-                <span className="meta-chip">{describeExtractionMethod(featuredStrategy.skill.extraction_method)}</span>
+              <div className="table-head strategy-ledger-head">
+                <span>策略</span>
+                <span>版本状态</span>
+                <span>实时运行</span>
+                <span>最近回测</span>
+                <span>关联上下文</span>
               </div>
-              <div className="detail-grid compact-grid">
-                <div className="detail-block">
-                  <small>实时上下文</small>
-                  <strong>{formatCount(featuredStrategy.signals.length)} 条信号</strong>
-                  <p>最近触发 {featuredStrategy.latestSignal ? formatTime(featuredStrategy.latestSignal.trigger_time_ms) : '暂无实时动作'}</p>
-                </div>
-                <div className="detail-block">
-                  <small>回放上下文</small>
-                  <strong>
-                    {readTotalReturnPct(featuredStrategy.latestBacktest) == null
-                      ? '等待首条回放'
-                      : `收益 ${formatPercent(readTotalReturnPct(featuredStrategy.latestBacktest))}`}
-                  </strong>
-                  <p>{featuredStrategy.latestBacktest ? `最近 run ${featuredStrategy.latestBacktest.id}` : '该策略还没有回放记录。'}</p>
-                </div>
+
+              <div className="record-list">
+                {insights.map((insight) => {
+                  const liveTask = insight.liveTask;
+                  const liveAccount = insight.livePortfolio?.account;
+                  return (
+                    <article className="record-row strategy-ledger-row" key={insight.skill.id}>
+                      <div className="strategy-row-main">
+                        <div className="record-cell">
+                          <p className="record-title">{insight.skill.title}</p>
+                          <p className="record-subtitle">{getStrategyExcerpt(insight.skill)}</p>
+                        </div>
+                        <div className="record-cell">
+                          <span className={`status-pill is-${toneForStatus(insight.skill.validation_status)}`}>
+                            {describeStatus(insight.skill.validation_status)}
+                          </span>
+                          <p className="record-subtitle">节奏 {getSkillCadence(insight.skill)} / Immutable</p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>{liveTask ? describeStatus(liveTask.status) : '未启动'}</strong>
+                          <p className="record-subtitle">
+                            {liveTask
+                              ? `收益 ${formatSignedPercent(liveAccount?.total_return_pct)} / 权益 ${formatSignedCurrency(liveAccount?.equity)}`
+                              : '当前没有实时运行实例。'}
+                          </p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>{insight.latestBacktest ? describeStatus(insight.latestBacktest.status) : '暂无'}</strong>
+                          <p className="record-subtitle">
+                            {insight.latestBacktest
+                              ? `${getProgressLabel(insight.latestBacktest)} / ${formatSignedPercent(getRunReturnPct(insight.latestBacktest))}`
+                              : '还没有回测记录。'}
+                          </p>
+                        </div>
+                        <div className="record-cell">
+                          <strong>
+                            {formatCount(insight.backtests.length)} 回测 / {formatCount(insight.signals.length)} 信号
+                          </strong>
+                          <p className="record-subtitle">
+                            {insight.recentSymbols.length ? insight.recentSymbols.join(' / ') : '等待交易标的上下文'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="record-footer">
+                        <div className="action-cluster">
+                          <Link className="action-button" to={`/strategies/${insight.skill.id}`}>
+                            只读档案
+                          </Link>
+                          <LifecycleActions
+                            actions={insight.skill.available_actions}
+                            disabled={(pendingKey?.startsWith(`${insight.skill.id}:`) ?? false) || loading}
+                            onAction={(action) => void handleStrategyAction(insight.skill, action)}
+                            pendingAction={pendingKey?.startsWith(`${insight.skill.id}:`) ? pendingKey.split(':')[1] ?? null : null}
+                          />
+                        </div>
+                      </div>
+
+                      <details className="expander">
+                        <summary>展开查看关联执行</summary>
+                        <div className="expander-stack">
+                          <section className="expander-section">
+                            <div className="expander-section-head">
+                              <div>
+                                <p className="section-eyebrow">Linked Live</p>
+                                <p className="record-title">实时运行</p>
+                              </div>
+                              <span className="section-note">每条策略最多保留一个实时实例。</span>
+                            </div>
+                            {liveTask ? (
+                              <div className="spec-sheet">
+                                <article className="spec-row is-emphasis">
+                                  <div className="spec-term-block">
+                                    <span className="spec-term">运行实例</span>
+                                  </div>
+                                  <div className="spec-main">
+                                    <strong>{liveTask.id}</strong>
+                                    <p>
+                                      {describeStatus(liveTask.status)} / 最后活动{' '}
+                                      {formatTime(liveTask.last_activity_at_ms ?? liveTask.last_triggered_at_ms)}
+                                    </p>
+                                  </div>
+                                  <div className="spec-side">
+                                    <span className="spec-side-label">模拟收益</span>
+                                    <strong>{formatSignedPercent(liveAccount?.total_return_pct)}</strong>
+                                    <p>
+                                      权益 {formatSignedCurrency(liveAccount?.equity)} / 已实现{' '}
+                                      {formatSignedCurrency(liveAccount?.realized_pnl)}
+                                    </p>
+                                  </div>
+                                </article>
+                                <article className="spec-row">
+                                  <div className="spec-term-block">
+                                    <span className="spec-term">控制动作</span>
+                                  </div>
+                                  <div className="spec-main">
+                                    <strong>{formatCount(liveTask.available_actions.filter((action) => action !== 'delete').length)}</strong>
+                                    <p>可以直接暂停、继续、停止或立即触发当前实时实例。</p>
+                                  </div>
+                                  <div className="spec-side">
+                                    <span className="spec-side-label">actions</span>
+                                    <div className="runtime-ledger-actions">
+                                      <LifecycleActions
+                                        actions={liveTask.available_actions.filter((action) => action !== 'delete')}
+                                        disabled={(pendingKey?.startsWith(`${liveTask.id}:`) ?? false) || loading}
+                                        onAction={(action) => void handleLiveAction(liveTask, action)}
+                                        pendingAction={pendingKey?.startsWith(`${liveTask.id}:`) ? pendingKey.split(':')[1] ?? null : null}
+                                      />
+                                    </div>
+                                  </div>
+                                </article>
+                              </div>
+                            ) : (
+                              <div className="empty-state compact-empty">
+                                <strong>当前没有实时运行实例</strong>
+                                <p>策略级动作里可以直接启动一条新的实时模拟。</p>
+                              </div>
+                            )}
+                          </section>
+
+                          <section className="expander-section">
+                            <div className="expander-section-head">
+                              <div>
+                                <p className="section-eyebrow">Linked Backtests</p>
+                                <p className="record-title">最近回测</p>
+                              </div>
+                              <span className="section-note">仅展示最近 3 条关联回测。</span>
+                            </div>
+                            {insight.backtests.length ? (
+                              <>
+                                <div className="table-head linked-backtest-head">
+                                  <span>回测</span>
+                                  <span>状态</span>
+                                  <span>结果</span>
+                                  <span>动作</span>
+                                </div>
+                                <div className="record-list">
+                                  {insight.backtests.slice(0, 3).map((run) => (
+                                    <article className="record-row linked-backtest-row" key={run.id}>
+                                      <div className="linked-backtest-main">
+                                        <div className="record-cell">
+                                          <p className="record-title">{run.id}</p>
+                                          <p className="record-subtitle">{formatWindow(run.start_time_ms, run.end_time_ms)}</p>
+                                        </div>
+                                        <div className="record-cell">
+                                          <span className={`status-pill is-${toneForStatus(run.status)}`}>{describeStatus(run.status)}</span>
+                                          <p className="record-subtitle">
+                                            {run.pending_action ? `待执行 ${run.pending_action}` : getProgressLabel(run)}
+                                          </p>
+                                        </div>
+                                        <div className="record-cell">
+                                          <strong>{getRunReturnPct(run) == null ? '等待结果' : formatSignedPercent(getRunReturnPct(run))}</strong>
+                                          <p className="record-subtitle">
+                                            最后活动 {formatTime(run.last_activity_at_ms ?? run.updated_at_ms)}
+                                          </p>
+                                        </div>
+                                        <div className="record-cell linked-backtest-actions">
+                                          <div className="action-cluster">
+                                            <Link className="text-link" to={`/replays/${run.id}`}>
+                                              打开详情
+                                            </Link>
+                                            <LifecycleActions
+                                              actions={run.available_actions}
+                                              disabled={(pendingKey?.startsWith(`${run.id}:`) ?? false) || loading}
+                                              onAction={(action) => void handleBacktestAction(run, action)}
+                                              pendingAction={pendingKey?.startsWith(`${run.id}:`) ? pendingKey.split(':')[1] ?? null : null}
+                                            />
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </article>
+                                  ))}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="empty-state compact-empty">
+                                <strong>还没有回测记录</strong>
+                                <p>可以直接从策略级动作发起最近 24 小时回测。</p>
+                              </div>
+                            )}
+                          </section>
+                        </div>
+                      </details>
+                    </article>
+                  );
+                })}
               </div>
-            </>
+            </section>
           ) : (
-            <div className="empty-product-card wide-empty-card">
-              <strong>{loading ? '正在整理策略目录...' : '还没有可浏览的策略档案'}</strong>
-              <p>上传或创建第一条 Skill 后，策略页会自动生成产品化的 profile 入口。</p>
-              <Link className="neon-button neon-button-secondary" to="/console">
-                前往 Console
-              </Link>
-            </div>
+            <section className="surface">
+              <div className="empty-state">
+                <strong>{loading ? '正在读取策略库存...' : '当前还没有策略'}</strong>
+                <p>直接在右侧输入 Skill，即可创建新的策略版本。</p>
+              </div>
+            </section>
           )}
-        </article>
+        </section>
 
-        <article className="neon-panel feature-panel">
-          <div className="section-heading-row">
-            <div>
-              <p className="section-kicker">Discovery Logic</p>
-              <h2>如何阅读一条策略</h2>
-            </div>
-          </div>
-          <div className="flow-list">
-            <div className="flow-step">
-              <small>01 / Cadence</small>
-              <strong>先确认它何时出手</strong>
-              <p>先看执行节奏与触发方式，再理解它是偏实时扫描还是偏回放复盘。</p>
-            </div>
-            <div className="flow-step">
-              <small>02 / Risk + Tooling</small>
-              <strong>再看它拥有什么边界</strong>
-              <p>风险规则和工具限制决定了策略的性格，也决定信号可信度和解释方式。</p>
-            </div>
-            <div className="flow-step">
-              <small>03 / Execution Context</small>
-              <strong>最后进入 signals 与 replays</strong>
-              <p>看最近 live signal、回放结果和多标的切片，才知道这条策略在市场里怎么表现。</p>
-            </div>
-          </div>
-        </article>
-      </section>
-
-      <section className="strategy-grid">
-        {strategyInsights.length ? (
-          strategyInsights.map((insight) => {
-            const latestReturn = readTotalReturnPct(insight.latestBacktest);
-            const requiredTools = insight.skill.envelope.tool_contract?.required_tools ?? [];
-
-            return (
-              <Link className="story-card strategy-directory-card" key={insight.skill.id} to={`/strategies/${insight.skill.id}`}>
-                <div className="signal-card-head">
-                  <div>
-                    <small>{describeStatus(insight.skill.validation_status)}</small>
-                    <strong>{insight.skill.title}</strong>
-                  </div>
-                  <span className={`tone-pill is-${toneForStatus(insight.skill.validation_status)}`}>
-                    {getSkillCadence(insight.skill)}
-                  </span>
-                </div>
-                <p>{getStrategyExcerpt(insight.skill)}</p>
-                <div className="detail-grid compact-grid">
-                  <div className="detail-block compact-block">
-                    <small>Live Signals</small>
-                    <strong>{formatCount(insight.signals.length)}</strong>
-                    <p>{insight.latestSignal ? formatTime(insight.latestSignal.trigger_time_ms) : '暂无'}</p>
-                  </div>
-                  <div className="detail-block compact-block">
-                    <small>Replay</small>
-                    <strong>{latestReturn == null ? '等待样本' : formatPercent(latestReturn)}</strong>
-                    <p>{insight.latestBacktest ? insight.latestBacktest.id : '暂无 backtest'}</p>
-                  </div>
-                </div>
-                <div className="tag-row">
-                  {(insight.recentSymbols.length ? insight.recentSymbols : requiredTools).slice(0, 4).map((item) => (
-                    <span className="meta-chip" key={item}>
-                      {item}
-                    </span>
-                  ))}
-                  {!insight.recentSymbols.length && !requiredTools.length ? <span className="meta-chip">等待首条执行上下文</span> : null}
-                </div>
-                <span className="muted-label">最近活动 {formatTime(insight.lastActivityMs)}</span>
-              </Link>
-            );
-          })
-        ) : (
-          <div className="empty-product-card wide-empty-card">
-            <strong>{loading ? '策略目录加载中...' : '还没有策略可供浏览'}</strong>
-            <p>去 Console 创建策略版本后，产品侧会在这里形成可阅读的档案库。</p>
-          </div>
-        )}
+        <div className="management-side">
+          <StrategyComposer
+            description="创建完成后立即进入策略工作台；策略会成为不可编辑的执行锚点。"
+            onCreated={() => {
+              setLoading(true);
+              void load();
+            }}
+            title="新增策略"
+          />
+        </div>
       </section>
     </div>
   );

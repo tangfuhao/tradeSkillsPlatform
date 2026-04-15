@@ -3,14 +3,24 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models import BacktestRun, RunTrace, Skill, TraceExecutionDetail
+from app.models import BacktestRun, RunTrace, Skill
 from app.services.agent_runner_client import execute_agent_run
 from app.services.demo_runtime import build_trigger_times, compute_max_drawdown
+from app.services.execution_cleanup import delete_backtest_run
+from app.services.execution_lifecycle import (
+    BACKTEST_STATUS_COMPLETED,
+    BACKTEST_STATUS_FAILED,
+    BACKTEST_STATUS_PAUSED,
+    BACKTEST_STATUS_QUEUED,
+    BACKTEST_STATUS_RUNNING,
+    BACKTEST_STATUS_STOPPED,
+    BACKTEST_STATUS_STOPPING,
+)
 from app.services.market_data_store import get_market_data_coverage
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import backtest_to_dict, trace_to_dict
@@ -26,19 +36,26 @@ class BacktestService:
         skill = self.db.get(Skill, skill_id)
         if skill is None:
             raise LookupError("Skill not found.")
+        if skill.validation_status != "passed":
+            raise ValueError("Only validated strategies can start backtests.")
         start_at = ensure_utc(start_time)
         end_at = ensure_utc(end_time)
         cadence = (skill.envelope_json or {}).get("trigger", {}).get("value", "15m")
-        _validate_backtest_window(self.db, start_at, end_at, cadence)
+        trigger_times, _ = _validate_backtest_window(self.db, start_at, end_at, cadence)
         run = BacktestRun(
             id=new_id("bt"),
             skill_id=skill.id,
-            status="queued",
+            status=BACKTEST_STATUS_QUEUED,
             scope="historical",
             start_time=start_at,
             end_time=end_at,
             initial_capital=initial_capital,
             benchmark_name=settings.default_benchmark,
+            total_trigger_count=len(trigger_times),
+            completed_trigger_count=0,
+            control_requested=None,
+            last_processed_trace_index=None,
+            last_processed_trigger_time_ms=None,
         )
         self.db.add(run)
         engine = PortfolioEngine(
@@ -86,17 +103,71 @@ class BacktestService:
         )
         return engine.get_portfolio_state()
 
+    def control_run(self, run_id: str, action: str) -> tuple[dict[str, Any], bool]:
+        run = self.db.get(BacktestRun, run_id)
+        if run is None:
+            raise LookupError("Backtest run not found.")
+
+        normalized = action.strip().lower()
+        should_enqueue = False
+
+        if normalized == "pause":
+            if run.status == BACKTEST_STATUS_QUEUED:
+                run.status = BACKTEST_STATUS_PAUSED
+                run.control_requested = None
+            elif run.status == BACKTEST_STATUS_RUNNING:
+                run.control_requested = "pause"
+            else:
+                raise ValueError(f"Cannot pause a backtest in status '{run.status}'.")
+        elif normalized == "resume":
+            if run.status != BACKTEST_STATUS_PAUSED:
+                raise ValueError(f"Cannot resume a backtest in status '{run.status}'.")
+            if run.completed_trigger_count >= run.total_trigger_count > 0:
+                raise ValueError("Backtest has already completed.")
+            run.status = BACKTEST_STATUS_RUNNING
+            run.control_requested = None
+            run.error_message = None
+            should_enqueue = True
+        elif normalized == "stop":
+            if run.status == BACKTEST_STATUS_QUEUED:
+                run.status = BACKTEST_STATUS_STOPPED
+                run.control_requested = None
+            elif run.status == BACKTEST_STATUS_RUNNING:
+                run.status = BACKTEST_STATUS_STOPPING
+                run.control_requested = None
+            elif run.status == BACKTEST_STATUS_PAUSED:
+                run.status = BACKTEST_STATUS_STOPPED
+                run.control_requested = None
+            else:
+                raise ValueError(f"Cannot stop a backtest in status '{run.status}'.")
+        else:
+            raise ValueError(f"Unsupported backtest action '{action}'.")
+
+        run.updated_at = utc_now()
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return backtest_to_dict(run), should_enqueue
+
+    def delete_run(self, run_id: str) -> None:
+        run = self.db.get(BacktestRun, run_id)
+        if run is None:
+            raise LookupError("Backtest run not found.")
+        if run.status in {BACKTEST_STATUS_QUEUED, BACKTEST_STATUS_RUNNING, BACKTEST_STATUS_STOPPING}:
+            raise ValueError("Stop or pause the backtest before deleting it.")
+        delete_backtest_run(self.db, run)
+        self.db.commit()
+
+
 
 def execute_backtest_job(run_id: str) -> None:
     with SessionLocal() as db:
         run = db.get(BacktestRun, run_id)
-        if run is None:
+        if run is None or run.status not in {BACKTEST_STATUS_QUEUED, BACKTEST_STATUS_RUNNING}:
             return
         skill = db.get(Skill, run.skill_id)
         if skill is None:
-            run.status = "failed"
-            run.error_message = "Skill missing for backtest run."
-            db.commit()
+            _mark_run_failed(db, run_id, "Skill missing for backtest run.")
             return
 
         engine = PortfolioEngine(
@@ -108,18 +179,42 @@ def execute_backtest_job(run_id: str) -> None:
         )
 
         try:
-            run.status = "running"
-            run.error_message = None
-            _reset_run_execution_state(db, run, engine)
-            db.commit()
-
             envelope = skill.envelope_json or {}
             cadence = envelope.get("trigger", {}).get("value", "15m")
             trigger_times, truncated = build_trigger_times(run.start_time, run.end_time, cadence)
-            equity_curve = [run.initial_capital]
+            run.total_trigger_count = len(trigger_times)
+            run.status = BACKTEST_STATUS_RUNNING
+            run.error_message = None
+            db.add(run)
+
+            if run.completed_trigger_count == 0:
+                _reset_run_execution_state(db, run, engine)
+            db.commit()
+
+            equity_curve = _load_existing_equity_curve(db, run_id, run.initial_capital)
             market_data_provider = "historical_db"
 
-            for trace_index, trigger_time in enumerate(trigger_times):
+            for trace_index in range(int(run.completed_trigger_count or 0), len(trigger_times)):
+                persisted_run = db.get(BacktestRun, run_id)
+                if persisted_run is None:
+                    return
+                if persisted_run.status == BACKTEST_STATUS_STOPPING:
+                    persisted_run.status = BACKTEST_STATUS_STOPPED
+                    persisted_run.updated_at = utc_now()
+                    db.add(persisted_run)
+                    db.commit()
+                    return
+                if persisted_run.control_requested == "pause":
+                    persisted_run.status = BACKTEST_STATUS_PAUSED
+                    persisted_run.control_requested = None
+                    persisted_run.updated_at = utc_now()
+                    db.add(persisted_run)
+                    db.commit()
+                    return
+                if persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}:
+                    return
+
+                trigger_time = trigger_times[trace_index]
                 try:
                     market_snapshot = build_market_snapshot_for_backtest(db, trigger_time, trace_index)
                     market_data_provider = market_snapshot.get("provider", market_data_provider)
@@ -165,9 +260,7 @@ def execute_backtest_job(run_id: str) -> None:
                         trigger_time=trigger_time,
                         trace_index=trace_index,
                     )
-                    decision["execution_reference"] = (
-                        fills[-1]["execution_reference"] if fills else "no_execution"
-                    )
+                    decision["execution_reference"] = fills[-1]["execution_reference"] if fills else "no_execution"
                     decision["fill_count"] = len(fills)
 
                     trace = RunTrace(
@@ -182,6 +275,8 @@ def execute_backtest_job(run_id: str) -> None:
                     )
                     db.add(trace)
                     db.flush()
+                    from app.models import TraceExecutionDetail
+
                     db.add(
                         TraceExecutionDetail(
                             id=new_id("ted"),
@@ -192,8 +287,15 @@ def execute_backtest_job(run_id: str) -> None:
                             mark_prices_json=after_mark_prices or before_mark_prices,
                         )
                     )
-                    run.updated_at = utc_now()
-                    db.add(run)
+
+                    persisted_run = db.get(BacktestRun, run_id)
+                    if persisted_run is None:
+                        return
+                    persisted_run.completed_trigger_count = trace_index + 1
+                    persisted_run.last_processed_trace_index = trace_index
+                    persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_time)
+                    persisted_run.updated_at = utc_now()
+                    db.add(persisted_run)
                     db.commit()
                     equity_curve.append(float((portfolio_after.get("account") or {}).get("equity", run.initial_capital)))
                 except Exception as exc:
@@ -215,24 +317,38 @@ def execute_backtest_job(run_id: str) -> None:
                 closed_trade_count=int(stats["closed_trade_count"]),
                 win_rate=float(stats["win_rate"]),
             )
-            run.summary_json = summary
-            run.status = "completed"
-            run.updated_at = utc_now()
-            db.add(run)
-            db.commit()
-        except Exception as exc:
-            db.rollback()
             persisted_run = db.get(BacktestRun, run_id)
             if persisted_run is None:
                 return
-            persisted_run.status = "failed"
-            persisted_run.error_message = str(exc)
+            persisted_run.summary_json = summary
+            persisted_run.status = BACKTEST_STATUS_COMPLETED
+            persisted_run.control_requested = None
+            persisted_run.completed_trigger_count = len(trigger_times)
+            persisted_run.last_processed_trace_index = len(trigger_times) - 1 if trigger_times else None
+            persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_times[-1]) if trigger_times else None
             persisted_run.updated_at = utc_now()
             db.add(persisted_run)
             db.commit()
+        except Exception as exc:
+            db.rollback()
+            _mark_run_failed(db, run_id, str(exc))
 
 
-def _validate_backtest_window(db: Session, start_time: datetime, end_time: datetime, cadence: str) -> None:
+
+def _mark_run_failed(db: Session, run_id: str, message: str) -> None:
+    persisted_run = db.get(BacktestRun, run_id)
+    if persisted_run is None:
+        return
+    persisted_run.status = BACKTEST_STATUS_FAILED
+    persisted_run.control_requested = None
+    persisted_run.error_message = message
+    persisted_run.updated_at = utc_now()
+    db.add(persisted_run)
+    db.commit()
+
+
+
+def _validate_backtest_window(db: Session, start_time: datetime, end_time: datetime, cadence: str) -> tuple[list[datetime], bool]:
     if end_time <= start_time:
         raise ValueError("end_time must be later than start_time")
 
@@ -247,11 +363,13 @@ def _validate_backtest_window(db: Session, start_time: datetime, end_time: datet
             f"{coverage_start.isoformat()} -> {coverage_end.isoformat()}."
         )
 
-    trigger_times, _ = build_trigger_times(start_time, end_time, cadence)
+    trigger_times, truncated = build_trigger_times(start_time, end_time, cadence)
     if len(trigger_times) < 2:
         raise ValueError(
             f"Requested window must span at least one full {cadence} interval inside the available historical coverage."
         )
+    return trigger_times, truncated
+
 
 
 def _build_tool_gateway_context(
@@ -278,12 +396,44 @@ def _build_tool_gateway_context(
     }
 
 
+
 def _reset_run_execution_state(db: Session, run: BacktestRun, engine: PortfolioEngine) -> None:
+    from app.models import TraceExecutionDetail
+    from app.services.execution_cleanup import delete_execution_scope_state
+
     trace_ids = db.scalars(select(RunTrace.id).where(RunTrace.run_id == run.id)).all()
     if trace_ids:
-        db.execute(delete(TraceExecutionDetail).where(TraceExecutionDetail.trace_id.in_(trace_ids)))
-    db.execute(delete(RunTrace).where(RunTrace.run_id == run.id))
+        db.query(TraceExecutionDetail).filter(TraceExecutionDetail.trace_id.in_(trace_ids)).delete(synchronize_session=False)
+    db.query(RunTrace).filter(RunTrace.run_id == run.id).delete(synchronize_session=False)
+    delete_execution_scope_state(db, scope_kind=BACKTEST_SCOPE_KIND, scope_id=run.id)
+    engine.ensure_book(initial_capital=run.initial_capital)
+    engine.ensure_strategy_state()
     engine.reset_scope(initial_capital=run.initial_capital, clear_strategy_state=True)
+    run.completed_trigger_count = 0
+    run.control_requested = None
+    run.last_processed_trace_index = None
+    run.last_processed_trigger_time_ms = None
+    run.summary_json = None
+    run.error_message = None
+    db.add(run)
+
+
+
+def _load_existing_equity_curve(db: Session, run_id: str, initial_capital: float) -> list[float]:
+    traces = db.scalars(
+        select(RunTrace).where(RunTrace.run_id == run_id).order_by(RunTrace.trace_index.asc())
+    ).all()
+    if not traces:
+        return [initial_capital]
+
+    curve = [initial_capital]
+    for trace in traces:
+        execution_detail = trace.execution_detail
+        portfolio_after = execution_detail.portfolio_after_json if execution_detail else None
+        equity = float(((portfolio_after or {}).get("account") or {}).get("equity", initial_capital))
+        curve.append(equity)
+    return curve
+
 
 
 def _portfolio_hint(portfolio: dict[str, Any]) -> dict[str, Any]:
@@ -296,6 +446,7 @@ def _portfolio_hint(portfolio: dict[str, Any]) -> dict[str, Any]:
         "open_position_count": len(positions),
         "symbols": [item.get("symbol") for item in positions[:5]],
     }
+
 
 
 def _build_backtest_summary(
