@@ -76,6 +76,7 @@ export type Skill = {
   validation_errors: string[];
   validation_warnings: string[];
   immutable: boolean;
+  raw_text: string;
   available_actions: ExecutionAction[];
   active_live_task_id: string | null;
   created_at_ms: number;

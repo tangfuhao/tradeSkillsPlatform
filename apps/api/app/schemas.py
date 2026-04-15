@@ -35,6 +35,7 @@ class SkillResponse(BaseModel):
     validation_errors: list[str]
     validation_warnings: list[str]
     immutable: bool = True
+    raw_text: str
     available_actions: list[str] = Field(default_factory=list)
     active_live_task_id: str | None = None
     created_at_ms: int

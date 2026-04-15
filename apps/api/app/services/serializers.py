@@ -34,6 +34,7 @@ def skill_to_dict(skill: Skill, *, has_active_live_runtime: bool = False, active
             validation_status=skill.validation_status,
             has_active_live_runtime=has_active_live_runtime,
         ),
+        "raw_text": skill.raw_text,
         "active_live_task_id": active_live_task_id,
         "created_at_ms": datetime_to_ms(skill.created_at),
         "updated_at_ms": datetime_to_ms(skill.updated_at),

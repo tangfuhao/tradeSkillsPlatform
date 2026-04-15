@@ -271,6 +271,20 @@ export default function StrategyProfilePage() {
           </div>
         </section>
       </section>
+
+      {skill?.raw_text ? (
+        <section className="surface">
+          <div className="section-head">
+            <div>
+              <p className="section-eyebrow">原始文本</p>
+              <h2>策略原文</h2>
+            </div>
+          </div>
+          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0, padding: 16, fontSize: 14, lineHeight: 1.6 }}>
+            {skill.raw_text}
+          </pre>
+        </section>
+      ) : null}
     </div>
   );
 }
