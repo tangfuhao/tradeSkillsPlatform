@@ -136,9 +136,9 @@ export default function StrategiesPage() {
   const stats = useMemo(
     () => [
       {
-        label: '策略总数',
+        label: 'Skills 总数',
         value: formatCount(insights.length),
-        detail: '策略创建后不可编辑，只能派生新版本',
+        detail: 'Skill 创建后不可编辑，只能派生新版本',
       },
       {
         label: '实时持有',
@@ -357,9 +357,9 @@ export default function StrategiesPage() {
   return (
     <div className="page-stack">
       <PageHeader
-        eyebrow="策略管理"
-        title="策略工作台"
-        description="创建、管理策略，配置回测窗口，启停实时运行。"
+        eyebrow="Skills 管理"
+        title="Agent Skills"
+        description="创建、管理 Agent Skills，配置回测窗口，启停实时运行。"
         actions={<AutoRefreshDot lastRefreshMs={lastRefreshMs} />}
       />
 
@@ -385,8 +385,8 @@ export default function StrategiesPage() {
             <section className="surface">
               <div className="section-head">
                 <div>
-                  <p className="section-eyebrow">策略台账</p>
-                  <h2>策略管理列表</h2>
+                  <p className="section-eyebrow">Skills 台账</p>
+                  <h2>Skills 管理列表</h2>
                 </div>
               </div>
 
@@ -589,8 +589,8 @@ export default function StrategiesPage() {
           ) : (
             <section className="surface">
               <div className="empty-state">
-                <strong>{loading ? '正在读取策略库存...' : '当前还没有策略'}</strong>
-                <p>点击顶部「新建策略」按钮创建第一条策略。</p>
+                <strong>{loading ? '正在读取 Skills...' : '当前还没有 Skill'}</strong>
+                <p>点击顶部「新建 Skill」按钮创建第一个 Skill。</p>
               </div>
             </section>
           )}

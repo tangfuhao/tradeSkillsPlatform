@@ -127,9 +127,9 @@ export default function ProductHomePage() {
         detail: recentBacktests[0] ? `最新回测 ${recentBacktests[0].id}` : '等待第一条回测',
       },
       {
-        label: '策略库存',
+        label: 'Skills 库存',
         value: formatCount(data.skills.length),
-        detail: `${formatCount(data.skills.filter((skill) => skill.validation_status === 'passed').length)} 条可执行策略`,
+        detail: `${formatCount(data.skills.filter((skill) => skill.validation_status === 'passed').length)} 个可执行 Skill`,
       },
       {
         label: '历史覆盖',
@@ -146,13 +146,12 @@ export default function ProductHomePage() {
   return (
     <div className="page-stack">
       <PageHeader
-        eyebrow="运营总览"
-        title="策略运营台"
-        description="实时模拟运行状态、最近回测、策略库存一览。"
+        eyebrow="系统总览"
+        title="Agent 控制台"
+        description="实时模拟运行状态、最近回测、Agent Skills 一览。"
         actions={
           <>
             <AutoRefreshDot lastRefreshMs={lastRefreshMs} />
-            <Link className="text-link" to="/strategies">策略管理</Link>
           </>
         }
       />
@@ -226,7 +225,7 @@ export default function ProductHomePage() {
             ) : (
               <div className="empty-state">
                 <strong>{loading ? '正在扫描实时任务...' : '当前没有正在运行的实时策略'}</strong>
-                <p>去策略页启动一条实时模拟后，这里会显示运行时长、收益和最近活动。</p>
+                <p>去 Skills 页启动一条实时模拟后，这里会显示运行时长、收益和最近活动。</p>
               </div>
             )}
           </section>
@@ -291,11 +290,11 @@ export default function ProductHomePage() {
           <section className="surface">
             <div className="section-head">
               <div>
-                <p className="section-eyebrow">最近策略</p>
-                <h2>策略列表</h2>
+                <p className="section-eyebrow">最近 Skills</p>
+                <h2>Skills 列表</h2>
               </div>
               <Link className="text-link" to="/strategies">
-                全部策略
+                全部 Skills
               </Link>
             </div>
             {loading && !recentStrategies.length ? (
@@ -331,8 +330,8 @@ export default function ProductHomePage() {
               </>
             ) : (
               <div className="empty-state compact-empty">
-                <strong>还没有策略库存</strong>
-                <p>点击顶部「新建策略」按钮创建第一条策略。</p>
+                <strong>还没有 Skills</strong>
+                <p>点击顶部「新建 Skill」按钮创建第一个 Skill。</p>
               </div>
             )}
           </section>
