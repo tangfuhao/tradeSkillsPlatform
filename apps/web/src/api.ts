@@ -1,4 +1,13 @@
-import type { BacktestRun, BacktestTrace, LiveSignal, LiveTask, MarketOverview, Skill } from './types';
+import type {
+  BacktestRun,
+  BacktestTrace,
+  LiveSignal,
+  LiveTask,
+  MarketCandle,
+  MarketOverview,
+  PortfolioState,
+  Skill,
+} from './types';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 const agentRunnerBaseUrl = import.meta.env.VITE_AGENT_RUNNER_BASE_URL ?? 'http://localhost:8100';
@@ -57,6 +66,10 @@ export async function listSkills(): Promise<Skill[]> {
   return readJson(`${apiBaseUrl}/api/v1/skills`);
 }
 
+export async function getSkill(skillId: string): Promise<Skill> {
+  return readJson(`${apiBaseUrl}/api/v1/skills/${skillId}`);
+}
+
 export async function createSkill(payload: { title?: string; skill_text: string }): Promise<Skill> {
   return readJson(`${apiBaseUrl}/api/v1/skills`, {
     method: 'POST',
@@ -68,11 +81,19 @@ export async function listBacktests(): Promise<BacktestRun[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`);
 }
 
+export async function getBacktest(runId: string): Promise<BacktestRun> {
+  return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}`);
+}
+
 export async function listBacktestTraces(runId: string): Promise<BacktestTrace[]> {
   return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/traces`);
 }
 
-export async function createBacktest(payload: { skill_id: string; start_time_ms: number; end_time_ms: number; initial_capital: number }): Promise<any> {
+export async function getBacktestPortfolio(runId: string): Promise<PortfolioState> {
+  return readJson(`${apiBaseUrl}/api/v1/backtests/${runId}/portfolio`);
+}
+
+export async function createBacktest(payload: { skill_id: string; start_time_ms: number; end_time_ms: number; initial_capital: number }): Promise<BacktestRun> {
   return readJson(`${apiBaseUrl}/api/v1/backtests`, {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -102,4 +123,23 @@ export async function listSignals(): Promise<LiveSignal[]> {
 
 export async function getMarketOverview(): Promise<MarketOverview> {
   return readJson(`${apiBaseUrl}/api/v1/market-data/overview`);
+}
+
+export async function listMarketCandles(payload: {
+  market_symbol: string;
+  timeframe?: string;
+  limit?: number;
+  end_time_ms?: number;
+}): Promise<MarketCandle[]> {
+  const search = new URLSearchParams({
+    market_symbol: payload.market_symbol,
+    timeframe: payload.timeframe ?? '15m',
+    limit: String(payload.limit ?? 120),
+  });
+
+  if (typeof payload.end_time_ms === 'number') {
+    search.set('end_time_ms', String(payload.end_time_ms));
+  }
+
+  return readJson(`${apiBaseUrl}/api/v1/market-data/candles?${search.toString()}`);
 }

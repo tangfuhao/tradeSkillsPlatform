@@ -1,3 +1,35 @@
+export type SkillRuntimeMode = 'backtest' | 'live_signal' | string;
+
+export type SkillTrigger = {
+  type?: string;
+  value?: string;
+  trigger_on?: 'bar_close' | 'wall_clock' | string;
+  timezone?: string;
+};
+
+export type SkillToolContract = {
+  required_tools?: string[];
+  optional_tools?: string[];
+};
+
+export type SkillOutputContract = {
+  schema?: string;
+  required_fields?: string[];
+};
+
+export type SkillRiskContract = {
+  max_position_pct?: number;
+  requires_stop_loss?: boolean;
+  max_daily_loss_pct?: number;
+  max_concurrent_positions?: number;
+  allow_hedging?: boolean;
+};
+
+export type SkillRuntimeProfile = {
+  needs_market_scan?: boolean;
+  needs_python_sandbox?: boolean;
+};
+
 export type ServicePulse = {
   name: string;
   status: string;
@@ -5,15 +37,15 @@ export type ServicePulse = {
 };
 
 export type SkillEnvelope = {
-  trigger?: {
-    value?: string;
-  };
-  tool_contract?: {
-    required_tools?: string[];
-  };
-  risk_contract?: {
-    max_position_pct?: number;
-  };
+  schema_version?: string;
+  runtime_modes?: SkillRuntimeMode[];
+  trigger?: SkillTrigger;
+  market_context?: Record<string, unknown>;
+  tool_contract?: SkillToolContract;
+  output_contract?: SkillOutputContract;
+  risk_contract?: SkillRiskContract;
+  state_contract?: Record<string, unknown>;
+  runtime_profile?: SkillRuntimeProfile;
   extraction_meta?: {
     method?: 'rule_only' | 'llm_fallback';
     fallback_used?: boolean;
@@ -21,6 +53,7 @@ export type SkillEnvelope = {
     reasoning_summary?: string;
     rule_failure_reasons?: string[];
   };
+  extraction_notes?: string[];
 };
 
 export type Skill = {
@@ -58,6 +91,56 @@ export type ToolCall = {
   status: string;
 };
 
+export type PortfolioAccount = {
+  initial_capital?: number;
+  cash_balance?: number;
+  equity?: number;
+  realized_pnl?: number;
+  unrealized_pnl?: number;
+  total_return_pct?: number;
+  last_mark_time_ms?: number | null;
+};
+
+export type PortfolioPosition = {
+  symbol: string;
+  direction: string;
+  quantity: number;
+  avg_entry_price: number;
+  mark_price: number;
+  position_notional: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  stop_loss?: Record<string, unknown> | null;
+  take_profit?: Record<string, unknown> | null;
+  opened_at_ms?: number | null;
+  updated_at_ms?: number | null;
+};
+
+export type PortfolioFill = {
+  id: string;
+  symbol: string;
+  action: string;
+  side: string;
+  quantity: number;
+  price: number;
+  notional: number;
+  realized_pnl: number;
+  closed_trade_pnl?: number | null;
+  closed_trade_win?: boolean | null;
+  trigger_time_ms: number;
+  trace_index?: number | null;
+  execution_reference?: string;
+};
+
+export type PortfolioState = {
+  scope_kind?: string;
+  scope_id?: string;
+  skill_id?: string;
+  account?: PortfolioAccount;
+  positions?: PortfolioPosition[];
+  recent_fills?: PortfolioFill[];
+};
+
 export type BacktestTrace = {
   id: string;
   trace_index: number;
@@ -65,6 +148,9 @@ export type BacktestTrace = {
   reasoning_summary: string;
   decision: Record<string, unknown>;
   tool_calls: ToolCall[];
+  portfolio_before?: PortfolioState | null;
+  portfolio_after?: PortfolioState | null;
+  fills: PortfolioFill[];
 };
 
 export type LiveTask = {
@@ -127,4 +213,20 @@ export type MarketOverview = {
   coverage_end_ms: number | null;
   recent_csv_jobs: CsvIngestionJob[];
   sync_cursors: MarketSyncCursor[];
+};
+
+export type MarketCandle = {
+  market_symbol: string;
+  base_symbol: string;
+  timeframe: string;
+  open_time_ms: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vol: number;
+  vol_ccy?: number | null;
+  vol_quote?: number | null;
+  confirm: boolean;
+  source: string;
 };
