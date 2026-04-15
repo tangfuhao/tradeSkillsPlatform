@@ -132,7 +132,7 @@ export default function ProductHomePage() {
         detail: `${formatCount(data.skills.filter((skill) => skill.validation_status === 'passed').length)} 个可执行 Skill`,
       },
       {
-        label: '历史覆盖',
+        label: '历史覆盖-交易对',
         value: formatCount(data.overview?.total_symbols ?? 0),
         detail: data.overview ? `${data.overview.base_timeframe} 数据底座` : '市场概览读取中',
       },
