@@ -2,7 +2,6 @@
 
 ## Purpose
 Define the persisted outputs, summaries, traces, portfolio views, and failure metadata that make completed or interrupted backtest runs inspectable by users and product surfaces.
-
 ## Requirements
 ### Requirement: Completed backtests return a core result summary
 The platform SHALL compute and store a core summary for every completed backtest, including realized PnL, unrealized PnL at the end of the window, net PnL, total return, benchmark comparison, max drawdown, trade count, win rate, fees paid, final equity, replay step count, and execution assumptions.
@@ -12,11 +11,11 @@ The platform SHALL compute and store a core summary for every completed backtest
 - **THEN** the API returns the stored summary metrics together with the benchmark name and assumption notes used for display
 
 ### Requirement: Result views expose trace samples and decision history
-The platform SHALL retain and expose the Agent's structured decisions, reasoning summaries, tool-call summaries, and per-step portfolio execution details for completed backtests.
+The platform SHALL retain and expose the Agent's structured decisions, reasoning summaries, tool-call summaries, and per-step portfolio execution details for completed backtests through PostgreSQL-backed paginated and filterable queries.
 
 #### Scenario: User inspects a trace sample
 - **WHEN** a user opens a completed backtest run
-- **THEN** the platform returns per-trigger trace entries including timestamp, final decision, reasoning summary, tool calls, and portfolio before/after snapshots
+- **THEN** the platform returns per-trigger trace entries including timestamp, final decision, reasoning summary, tool calls, and portfolio before/after snapshots in a deterministic order with pagination metadata when the trace volume exceeds a single response window
 
 ### Requirement: Users can inspect execution-scoped portfolio state for a run
 The platform SHALL expose the simulated portfolio account, open positions, and recent fills for a backtest run.
@@ -31,4 +30,11 @@ The platform SHALL retain the run status and failure message when replay executi
 #### Scenario: Backtest step fails
 - **WHEN** replay execution raises an error at a specific trigger step
 - **THEN** the platform marks the run as `failed` and returns an error message describing the failing step and timestamp
+
+### Requirement: Result history queries are index-backed and bounded
+The platform SHALL expose backtest result history through bounded query patterns that can filter by strategy, status, and time range without requiring full-table scans in application code.
+
+#### Scenario: User filters recent backtests for a strategy
+- **WHEN** a user requests recent backtest runs for one strategy and a bounded time range
+- **THEN** the platform answers from PostgreSQL-backed indexed filters and returns the matching runs in reverse chronological order with continuation metadata when needed
 

@@ -82,7 +82,7 @@ def control_backtest(
 ) -> BacktestResponse:
     service = BacktestService(db)
     try:
-        run, should_enqueue = service.control_run(run_id, payload.action)
+        run, should_enqueue = service.control_run(run_id, payload.action, expected_revision=payload.expected_revision)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:

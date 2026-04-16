@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -9,10 +14,23 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
-from app.models import MarketCandle, MarketInstrument, MarketSyncState
+from app.models import CsvIngestionJob, MarketCandle, MarketInstrument, MarketSyncState
 from app.runtime.market_sync_loop import MarketSyncLoopManager
-from app.services.market_data_store import get_market_overview, get_market_sync_status, list_market_universe
-from app.services.market_data_sync import get_fresh_market_symbols_for_dispatch, recompute_market_coverage_snapshot
+from app.services.market_data_store import (
+    aggregate_rows,
+    build_market_snapshot,
+    fetch_candles,
+    get_market_overview,
+    get_market_sync_status,
+    list_market_universe,
+)
+from app.services.market_data_sync import (
+    discover_local_csv_ingestion_jobs,
+    get_fresh_market_symbols_for_dispatch,
+    recompute_market_coverage_snapshot,
+    run_pending_csv_ingestion_jobs,
+    run_csv_ingestion_job,
+)
 from app.services.utils import datetime_to_ms, new_id, utc_now
 
 
@@ -72,7 +90,22 @@ class MarketSyncEngineTests(unittest.TestCase):
         )
         db.add_all([instrument, state])
 
-    def _seed_candle(self, db, *, open_time: datetime, market_symbol: str = "BTC-USDT-SWAP", source: str = "csv") -> None:
+    def _seed_candle(
+        self,
+        db,
+        *,
+        open_time: datetime,
+        market_symbol: str = "BTC-USDT-SWAP",
+        source: str = "csv",
+        open_price: float = 100.0,
+        high_price: float = 101.0,
+        low_price: float = 99.0,
+        close_price: float = 100.5,
+        vol: float = 1.0,
+        vol_ccy: float | None = 1.0,
+        vol_quote: float | None = 100.5,
+        is_old_contract: bool = False,
+    ) -> None:
         open_time_ms = datetime_to_ms(open_time)
         db.add(
             MarketCandle(
@@ -83,15 +116,15 @@ class MarketSyncEngineTests(unittest.TestCase):
                 instrument_type="SWAP",
                 timeframe="1m",
                 open_time_ms=open_time_ms,
-                open=100.0,
-                high=101.0,
-                low=99.0,
-                close=100.5,
-                vol=1.0,
-                vol_ccy=1.0,
-                vol_quote=100.5,
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
+                vol=vol,
+                vol_ccy=vol_ccy,
+                vol_quote=vol_quote,
                 confirm=True,
-                is_old_contract=False,
+                is_old_contract=is_old_contract,
                 source=source,
             )
         )
@@ -250,6 +283,182 @@ class MarketSyncEngineTests(unittest.TestCase):
         )
         self.assertEqual(overview["coverage_start_ms"], overview["coverage_ranges"][0]["start_ms"])
         self.assertEqual(overview["coverage_end_ms"], overview["coverage_ranges"][0]["end_ms"])
+
+    def test_fetch_candles_aggregated_timeframe_matches_python_parity(self) -> None:
+        end_time = datetime(2024, 1, 1, 12, 19, tzinfo=timezone.utc)
+        with self.session_factory() as db:
+            for minute in range(20):
+                base_price = 100.0 + minute
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2024, 1, 1, 12, minute, tzinfo=timezone.utc),
+                    market_symbol="BTC-USDT-SWAP",
+                    open_price=base_price,
+                    high_price=base_price + 2.0,
+                    low_price=base_price - 1.0,
+                    close_price=base_price + 0.5,
+                    vol=1.0 + minute,
+                    vol_ccy=2.0 + minute,
+                    vol_quote=3.0 + minute,
+                )
+            db.commit()
+
+            raw_rows = db.query(MarketCandle).order_by(MarketCandle.open_time_ms.asc()).all()
+            expected = aggregate_rows(raw_rows, "15m")[-2:]
+            actual = fetch_candles(
+                db,
+                market_symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                limit=2,
+                end_time=end_time,
+            )
+
+        self.assertEqual(actual, expected)
+
+    def test_build_market_snapshot_returns_ranked_sql_candidates(self) -> None:
+        as_of = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+        with self.session_factory() as db:
+            for minute in range(3):
+                self._seed_candle(
+                    db,
+                    open_time=as_of - timedelta(minutes=30 - minute),
+                    market_symbol="BTC-USDT-SWAP",
+                    open_price=100.0,
+                    high_price=110.0,
+                    low_price=99.0,
+                    close_price=105.0 + minute,
+                    vol=10.0,
+                    vol_quote=1000.0 + minute,
+                )
+                self._seed_candle(
+                    db,
+                    open_time=as_of - timedelta(minutes=30 - minute),
+                    market_symbol="ETH-USDT-SWAP",
+                    open_price=50.0,
+                    high_price=55.0,
+                    low_price=49.0,
+                    close_price=51.0 + minute,
+                    vol=2.0,
+                    vol_quote=100.0 + minute,
+                )
+            db.commit()
+
+            snapshot = build_market_snapshot(db, as_of, limit=1)
+
+        self.assertEqual(len(snapshot["market_candidates"]), 1)
+        self.assertEqual(snapshot["market_candidates"][0]["symbol"], "BTC-USDT-SWAP")
+        self.assertGreater(snapshot["market_candidates"][0]["volume_24h_usd"], 3000)
+        self.assertGreater(snapshot["market_candidates"][0]["change_24h_pct"], 0)
+
+    def test_csv_ingestion_discovery_creates_backlog_without_inserting_rows(self) -> None:
+        csv_content = (
+            "instrument_name,open_time,open,high,low,close,vol,vol_ccy,vol_quote,confirm\n"
+            "BTC-USDT-SWAP,1713225600000,1,2,0.5,1.5,10,10,15,1\n"
+        )
+        with TemporaryDirectory() as tmpdir, self.session_factory() as db:
+            csv_path = Path(tmpdir) / "allswap-candlesticks-test.csv"
+            csv_path.write_text(csv_content, encoding="utf-8")
+
+            with (
+                patch("app.services.market_data_sync.settings.historical_data_dir", Path(tmpdir)),
+                patch("app.services.market_data_sync.settings.historical_csv_glob", "allswap-candlesticks-*.csv"),
+                patch("app.services.market_data_store.settings.historical_data_dir", Path(tmpdir)),
+            ):
+                discovery = discover_local_csv_ingestion_jobs(db)
+                duplicate_discovery = discover_local_csv_ingestion_jobs(db)
+                overview = get_market_overview(db)
+
+            self.assertEqual(discovery["discovered_count"], 1)
+            self.assertEqual(duplicate_discovery["discovered_count"], 0)
+            self.assertEqual(overview["ingest_backlog"]["pending_count"], 1)
+            self.assertEqual(len(overview["recent_csv_jobs"]), 1)
+            self.assertEqual(overview["recent_csv_jobs"][0]["status"], "pending")
+            self.assertEqual(db.query(CsvIngestionJob).count(), 1)
+            self.assertEqual(db.query(MarketCandle).count(), 0)
+
+    def test_run_pending_csv_ingestion_jobs_imports_rows_and_updates_backlog(self) -> None:
+        csv_content = (
+            "instrument_name,open_time,open,high,low,close,vol,vol_ccy,vol_quote,confirm\n"
+            "BTC-USDT-SWAP,1713225600000,1,2,0.5,1.5,10,10,15,1\n"
+            "ETH-USDT-SWAP,1713225660000,2,3,1.5,2.5,11,11,16,0\n"
+        )
+        with TemporaryDirectory() as tmpdir, self.session_factory() as db:
+            csv_path = Path(tmpdir) / "allswap-candlesticks-run.csv"
+            csv_path.write_text(csv_content, encoding="utf-8")
+
+            with (
+                patch("app.services.market_data_sync.settings.historical_data_dir", Path(tmpdir)),
+                patch("app.services.market_data_sync.settings.historical_csv_glob", "allswap-candlesticks-*.csv"),
+                patch("app.services.market_data_store.settings.historical_data_dir", Path(tmpdir)),
+            ):
+                discover_local_csv_ingestion_jobs(db)
+                run_result = run_pending_csv_ingestion_jobs(db, limit=1, runner_id="test-runner", discover=False)
+                overview = get_market_overview(db)
+
+            self.assertEqual(run_result["completed_count"], 1)
+            self.assertEqual(run_result["failed_count"], 0)
+            self.assertEqual(len(run_result["jobs"]), 1)
+            self.assertEqual(run_result["jobs"][0]["runner_id"], "test-runner")
+            self.assertEqual(run_result["jobs"][0]["rows_seen"], 2)
+            self.assertEqual(run_result["jobs"][0]["rows_staged"], 1)
+            self.assertEqual(run_result["jobs"][0]["rows_inserted"], 1)
+            self.assertEqual(run_result["jobs"][0]["rows_filtered"], 1)
+            self.assertEqual(overview["ingest_backlog"]["pending_count"], 0)
+            self.assertEqual(overview["ingest_backlog"]["completed_count"], 1)
+            self.assertEqual(db.query(MarketCandle).count(), 1)
+
+    def test_run_csv_ingestion_job_skips_duplicate_work_when_job_already_running(self) -> None:
+        csv_content = (
+            "instrument_name,open_time,open,high,low,close,vol,vol_ccy,vol_quote,confirm\n"
+            "BTC-USDT-SWAP,1713225600000,1,2,0.5,1.5,10,10,15,1\n"
+        )
+        with TemporaryDirectory() as tmpdir, self.session_factory() as db:
+            csv_path = Path(tmpdir) / "allswap-candlesticks-running.csv"
+            csv_path.write_text(csv_content, encoding="utf-8")
+
+            with (
+                patch("app.services.market_data_sync.settings.historical_data_dir", Path(tmpdir)),
+                patch("app.services.market_data_sync.settings.historical_csv_glob", "allswap-candlesticks-*.csv"),
+            ):
+                discovery = discover_local_csv_ingestion_jobs(db)
+                job_id = discovery["jobs"][0]["id"]
+                job = db.get(CsvIngestionJob, job_id)
+                assert job is not None
+                job.status = "running"
+                job.runner_id = "other-runner"
+                db.add(job)
+                db.commit()
+
+                with patch("app.services.market_data_sync._ingest_csv_file") as ingest_mock:
+                    result = run_csv_ingestion_job(db, job_id, runner_id="second-runner")
+
+            self.assertEqual(result["status"], "running")
+            self.assertEqual(result["runner_id"], "other-runner")
+            ingest_mock.assert_not_called()
+
+    def test_runtime_storage_health_reports_unsupported_sqlite_without_import_crash(self) -> None:
+        script = """
+import json
+import os
+import sys
+
+sys.path.insert(0, "apps/api")
+os.environ["TRADE_SKILLS_DATABASE_URL"] = "sqlite:////tmp/tradeskills-health.db"
+
+from app.core.schema import inspect_runtime_storage
+
+print(json.dumps(inspect_runtime_storage()))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd="/Users/fuhao/Documents/hackson/tradeSkills",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "unsupported_engine")
+        self.assertEqual(payload["backend"], "sqlite")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -37,9 +37,14 @@ class Skill(Base):
 
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
+    __table_args__ = (
+        Index("ix_backtest_run_status_claim", "status", "claim_expires_at"),
+        Index("ix_backtest_run_claim_owner", "claim_owner"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     scope: Mapped[str] = mapped_column(String(32), default="historical")
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -51,6 +56,13 @@ class BacktestRun(Base):
     control_requested: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_processed_trace_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_processed_trigger_time_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     last_runtime_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
@@ -60,9 +72,17 @@ class BacktestRun(Base):
     skill: Mapped[Skill] = relationship(back_populates="backtests")
     traces: Mapped[list[RunTrace]] = relationship(back_populates="run")
 
+    __mapper_args__ = {
+        "version_id_col": revision,
+    }
+
 
 class RunTrace(Base):
     __tablename__ = "run_traces"
+    __table_args__ = (
+        UniqueConstraint("run_id", "trace_index", name="uq_run_trace_run_index"),
+        Index("ix_run_trace_run_created", "run_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("backtest_runs.id"), index=True)
@@ -80,27 +100,48 @@ class RunTrace(Base):
 
 class LiveTask(Base):
     __tablename__ = "live_tasks"
+    __table_args__ = (
+        Index("ix_live_task_status_claim", "status", "execution_claim_expires_at"),
+        Index("ix_live_task_claim_owner", "execution_claim_owner"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     cadence: Mapped[str] = mapped_column(String(16))
     cadence_seconds: Mapped[int] = mapped_column(Integer)
     last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_completed_slot_as_of_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_claimed_slot_as_of_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    execution_claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_claim_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execution_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     skill: Mapped[Skill] = relationship(back_populates="live_tasks")
     signals: Mapped[list[LiveSignal]] = relationship(back_populates="live_task")
 
+    __mapper_args__ = {
+        "version_id_col": revision,
+    }
+
 
 class LiveSignal(Base):
     __tablename__ = "live_signals"
+    __table_args__ = (
+        UniqueConstraint("live_task_id", "execution_time_ms", name="uq_live_signal_task_slot"),
+        Index("ix_live_signal_task_created", "live_task_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     live_task_id: Mapped[str] = mapped_column(ForeignKey("live_tasks.id"), index=True)
     trigger_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    execution_time_ms: Mapped[int] = mapped_column(BigInteger, index=True)
+    dispatch_as_of_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trigger_origin: Mapped[str] = mapped_column(String(32), default="manual")
     signal_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     delivery_status: Mapped[str] = mapped_column(String(32), default="stored")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -193,6 +234,7 @@ class PortfolioFill(Base):
     __tablename__ = "portfolio_fills"
     __table_args__ = (
         Index("ix_portfolio_fill_book_time", "book_id", "trigger_time_ms"),
+        Index("ix_portfolio_fill_created_at", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -234,19 +276,19 @@ class TraceExecutionDetail(Base):
 class MarketCandle(Base):
     __tablename__ = "market_candles"
     __table_args__ = (
-        UniqueConstraint("exchange", "market_symbol", "timeframe", "open_time_ms", name="uq_market_candle"),
+        Index("ix_market_candle_partition_lookup", "open_time_ms"),
         Index("ix_market_candle_symbol_time", "market_symbol", "timeframe", "open_time_ms"),
         Index("ix_market_candle_base_time", "base_symbol", "timeframe", "open_time_ms"),
+        {"postgresql_partition_by": "RANGE (open_time_ms)"},
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    exchange: Mapped[str] = mapped_column(String(16), default="okx", index=True)
-    market_symbol: Mapped[str] = mapped_column(String(128), index=True)
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True, default="okx", index=True)
+    market_symbol: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
     base_symbol: Mapped[str] = mapped_column(String(64), index=True)
     quote_asset: Mapped[str] = mapped_column(String(16), default="USDT")
     instrument_type: Mapped[str] = mapped_column(String(16), default="SWAP")
-    timeframe: Mapped[str] = mapped_column(String(16), default="1m")
-    open_time_ms: Mapped[int] = mapped_column(BigInteger, index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), primary_key=True, default="1m")
+    open_time_ms: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     open: Mapped[float] = mapped_column(Float)
     high: Mapped[float] = mapped_column(Float)
     low: Mapped[float] = mapped_column(Float)
@@ -263,19 +305,25 @@ class MarketCandle(Base):
 
 class CsvIngestionJob(Base):
     __tablename__ = "csv_ingestion_jobs"
+    __table_args__ = (
+        Index("ix_csv_ingestion_job_requested", "requested_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     source_path: Mapped[str] = mapped_column(String(512))
     source_fingerprint: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    runner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rows_seen: Mapped[int] = mapped_column(Integer, default=0)
+    rows_staged: Mapped[int] = mapped_column(Integer, default=0)
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0)
     rows_filtered: Mapped[int] = mapped_column(Integer, default=0)
     coverage_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     coverage_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

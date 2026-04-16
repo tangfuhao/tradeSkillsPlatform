@@ -11,6 +11,9 @@ API_PORT=8000
 RUNNER_PORT=8100
 WEB_PORT=5173
 REDIS_PORT=6379
+POSTGRES_PORT=5432
+POSTGRES_DATA_DIR="$DEV_DIR/postgres-data"
+LEGACY_SQLITE_PATH="$ROOT/data/runtime/trade_skills.db"
 API_HEALTH_URL="http://127.0.0.1:${API_PORT}/api/v1/health"
 RUNNER_HEALTH_URL="http://127.0.0.1:${RUNNER_PORT}/healthz"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}"
@@ -158,6 +161,44 @@ cleanup_started_services() {
 
 trap cleanup_started_services ERR
 
+ensure_postgres_cluster() {
+  if [[ -d "$POSTGRES_DATA_DIR/base" ]]; then
+    return 0
+  fi
+
+  require_cmd initdb
+  mkdir -p "$POSTGRES_DATA_DIR"
+  log "initializing local postgres cluster in $POSTGRES_DATA_DIR"
+  initdb -D "$POSTGRES_DATA_DIR" >/dev/null
+}
+
+bootstrap_postgres_runtime_db() {
+  require_cmd psql
+  require_cmd createdb
+  psql -h 127.0.0.1 -p "$POSTGRES_PORT" -d postgres -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tradeskills') THEN
+    CREATE ROLE tradeskills LOGIN PASSWORD 'tradeskills';
+  END IF;
+END
+$$;
+SQL
+
+  if ! psql -h 127.0.0.1 -p "$POSTGRES_PORT" -lqt | cut -d '|' -f 1 | grep -qx ' tradeskills'; then
+    createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -O tradeskills tradeskills
+  fi
+}
+
+warn_on_legacy_sqlite_runtime() {
+  if [[ ! -f "$LEGACY_SQLITE_PATH" ]]; then
+    return 0
+  fi
+
+  log "legacy SQLite runtime detected at $LEGACY_SQLITE_PATH"
+  log "migrate demo data with: $ROOT/.venv/bin/python $ROOT/scripts/migrate_sqlite_to_postgres.py"
+}
+
 start_service() {
   local name="$1"
   local cwd="$2"
@@ -272,9 +313,28 @@ require_cmd python3
 require_file "$ROOT/scripts/bootstrap-dev.sh"
 require_file "$ROOT/scripts/check_runner_env.py"
 require_file "$ROOT/apps/api/.env"
+require_file "$ROOT/apps/api/alembic.ini"
 require_file "$ROOT/services/agent-runner/.env"
 require_file "$ROOT/apps/web/.env.local"
 require_file "$ROOT/apps/web/package.json"
+
+if [[ -n "$(listening_pid "$POSTGRES_PORT")" ]]; then
+  log "postgres already available on port $POSTGRES_PORT"
+elif command -v postgres >/dev/null 2>&1 && command -v initdb >/dev/null 2>&1; then
+  ensure_postgres_cluster
+  start_port_service \
+    postgres \
+    "$ROOT" \
+    "$POSTGRES_PORT" \
+    20 \
+    postgres -D "$POSTGRES_DATA_DIR" -p "$POSTGRES_PORT" -c listen_addresses=127.0.0.1
+else
+  log "postgres is required but nothing is listening on port $POSTGRES_PORT"
+  log "install PostgreSQL locally or start a server on port $POSTGRES_PORT before running dev-up"
+  exit 1
+fi
+
+bootstrap_postgres_runtime_db
 
 if [[ -n "$(listening_pid "$REDIS_PORT")" ]]; then
   log "redis already available on port $REDIS_PORT"
@@ -293,6 +353,14 @@ fi
 log "bootstrapping local environments and dependencies"
 "$ROOT/scripts/bootstrap-dev.sh"
 require_file "$ROOT/.venv/bin/python"
+require_file "$ROOT/.venv/bin/alembic"
+
+log "running PostgreSQL migrations"
+(
+  cd "$ROOT/apps/api"
+  "$ROOT/.venv/bin/alembic" upgrade head
+)
+warn_on_legacy_sqlite_runtime
 
 log "running Agent Runner environment checks"
 "$ROOT/.venv/bin/python" "$ROOT/scripts/check_runner_env.py"

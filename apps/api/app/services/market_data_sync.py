@@ -10,10 +10,11 @@ from typing import Any
 
 import httpx
 from sqlalchemy import func, or_, select, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.database import bulk_operation_session
 from app.models import (
     CsvIngestionJob,
     MarketCandle,
@@ -30,16 +31,30 @@ from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
 logger = logging.getLogger(__name__)
 
 BULK_BATCH_SIZE = 10_000
-SQLITE_MAX_VARS = 900
-
-_SECONDARY_INDEXES = [
-    ("ix_market_candle_symbol_time", "market_candles", "(market_symbol, timeframe, open_time_ms)"),
-    ("ix_market_candle_base_time", "market_candles", "(base_symbol, timeframe, open_time_ms)"),
-    ("ix_market_candles_exchange", "market_candles", "(exchange)"),
-    ("ix_market_candles_market_symbol", "market_candles", "(market_symbol)"),
-    ("ix_market_candles_base_symbol", "market_candles", "(base_symbol)"),
-    ("ix_market_candles_open_time_ms", "market_candles", "(open_time_ms)"),
-]
+POSTGRESQL_STAGE_MIN_ROWS = 500
+_CSV_INGEST_STAGE_TABLE = "market_candle_ingest_stage"
+_MARKET_CANDLE_BATCH_STAGE_TABLE = "market_candle_batch_stage"
+_CSV_INGEST_STAGE_COLUMNS = (
+    "exchange",
+    "market_symbol",
+    "base_symbol",
+    "quote_asset",
+    "instrument_type",
+    "timeframe",
+    "open_time_ms",
+    "open",
+    "high",
+    "low",
+    "close",
+    "vol",
+    "vol_ccy",
+    "vol_quote",
+    "confirm",
+    "is_old_contract",
+    "source",
+    "created_at",
+    "updated_at",
+)
 
 
 @dataclass(slots=True)
@@ -75,102 +90,257 @@ class MarketSyncSweepResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def _drop_secondary_indexes(db: Session) -> None:
-    for idx_name, _, _ in _SECONDARY_INDEXES:
-        db.execute(text(f"DROP INDEX IF EXISTS {idx_name}"))
-    db.commit()
-    logger.info("Dropped %d secondary indexes for bulk import.", len(_SECONDARY_INDEXES))
-
-
-def _rebuild_secondary_indexes(db: Session) -> None:
-    for idx_name, table, columns in _SECONDARY_INDEXES:
-        db.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} {columns}"))
-    db.commit()
-    logger.info("Rebuilt %d secondary indexes after bulk import.", len(_SECONDARY_INDEXES))
-
-
 def run_startup_market_data_sync(db: Session) -> dict[str, Any]:
     started_at = utc_now()
-    imported_files = import_local_csv_seed_data(db)
     target_cutoff = compute_startup_sync_cutoff()
     sync_sweep_result = sync_incremental_okx_history(db, cutoff=target_cutoff)
     finished_at = utc_now()
     return {
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
-        "imported_files": imported_files,
         "sync_sweep": sync_sweep_result.to_dict(),
         "sync_sweep_result": sync_sweep_result,
+        "ingest_backlog": get_csv_ingestion_backlog(db),
         "target_cutoff": target_cutoff.isoformat(),
     }
 
 
-def import_local_csv_seed_data(db: Session) -> int:
+def discover_local_csv_ingestion_jobs(db: Session) -> dict[str, Any]:
     csv_paths = sorted(settings.historical_data_dir.glob(settings.historical_csv_glob))
-    pending_paths: list[tuple[Path, str]] = []
-    for path in csv_paths:
-        fingerprint = build_source_fingerprint(path)
-        existing = db.scalar(
-            select(CsvIngestionJob).where(
-                CsvIngestionJob.source_fingerprint == fingerprint,
-                CsvIngestionJob.status == "completed",
+    fingerprints = [build_source_fingerprint(path) for path in csv_paths]
+    existing_fingerprints = set()
+    if fingerprints:
+        existing_fingerprints = set(
+            db.scalars(
+                select(CsvIngestionJob.source_fingerprint).where(CsvIngestionJob.source_fingerprint.in_(fingerprints))
+            ).all()
+        )
+
+    requested_at = utc_now()
+    discovered_jobs: list[CsvIngestionJob] = []
+    for path, fingerprint in zip(csv_paths, fingerprints, strict=False):
+        if fingerprint in existing_fingerprints:
+            continue
+        discovered_jobs.append(
+            CsvIngestionJob(
+                id=new_id("csvjob"),
+                source_path=str(path),
+                source_fingerprint=fingerprint,
+                status="pending",
+                requested_at=requested_at,
+                notes_json=_build_csv_job_notes(path),
             )
         )
-        if existing is not None:
-            continue
-        pending_paths.append((path, fingerprint))
 
-    if not pending_paths:
-        return 0
-
-    logger.info("Bulk CSV import: %d files to process. Dropping secondary indexes...", len(pending_paths))
-    _drop_secondary_indexes(db)
-
-    imported_count = 0
-    try:
-        for path, fingerprint in pending_paths:
-            ingest_csv_file(db, path, fingerprint)
-            imported_count += 1
-    finally:
-        logger.info("Rebuilding secondary indexes...")
-        _rebuild_secondary_indexes(db)
-
-    return imported_count
-
-
-def ingest_csv_file(db: Session, path: Path, fingerprint: str) -> None:
-    logger.info("Importing historical CSV seed: %s", path)
-    job = db.scalar(select(CsvIngestionJob).where(CsvIngestionJob.source_fingerprint == fingerprint))
-    if job is None:
-        job = CsvIngestionJob(
-            id=new_id("csvjob"),
-            source_path=str(path),
-            source_fingerprint=fingerprint,
-            status="running",
-            started_at=utc_now(),
-            notes_json={"timeframe": settings.historical_base_timeframe},
-        )
-        db.add(job)
+    if discovered_jobs:
+        db.add_all(discovered_jobs)
         db.commit()
-        db.refresh(job)
+
+    backlog = get_csv_ingestion_backlog(db)
+    return {
+        "scanned_count": len(csv_paths),
+        "discovered_count": len(discovered_jobs),
+        "jobs": [serialize_csv_ingestion_job(job) for job in discovered_jobs],
+        "backlog": backlog,
+    }
+
+
+def list_csv_ingestion_jobs(db: Session, *, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    query = select(CsvIngestionJob)
+    if status is not None:
+        query = query.where(CsvIngestionJob.status == status)
+    jobs = db.scalars(
+        query.order_by(CsvIngestionJob.requested_at.desc(), CsvIngestionJob.id.desc()).limit(limit)
+    ).all()
+    return [serialize_csv_ingestion_job(job) for job in jobs]
+
+
+def get_csv_ingestion_backlog(db: Session) -> dict[str, Any]:
+    jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.requested_at.asc(), CsvIngestionJob.id.asc())).all()
+    pending_jobs = [job for job in jobs if job.status == "pending"]
+    running_jobs = [job for job in jobs if job.status == "running"]
+    failed_jobs = [job for job in jobs if job.status == "failed"]
+    completed_jobs = [job for job in jobs if job.status == "completed"]
+    if running_jobs:
+        status = "running"
+    elif pending_jobs:
+        status = "backlog"
+    elif failed_jobs:
+        status = "failed"
     else:
-        job.source_path = str(path)
-        job.status = "running"
-        job.rows_seen = 0
-        job.rows_filtered = 0
-        job.rows_inserted = 0
-        job.coverage_start_ms = None
-        job.coverage_end_ms = None
-        job.error_message = None
-        job.started_at = utc_now()
-        job.completed_at = None
-        job.notes_json = {"timeframe": settings.historical_base_timeframe}
+        status = "idle"
+    return {
+        "status": status,
+        "pending_count": len(pending_jobs),
+        "running_count": len(running_jobs),
+        "failed_count": len(failed_jobs),
+        "completed_count": len(completed_jobs),
+        "oldest_pending_requested_at_ms": datetime_to_ms(pending_jobs[0].requested_at) if pending_jobs else None,
+        "latest_completed_at_ms": max(
+            (datetime_to_ms(job.completed_at) for job in completed_jobs if job.completed_at is not None),
+            default=None,
+        ),
+        "pending_paths_sample": [job.source_path for job in pending_jobs[:5]],
+    }
+
+
+def run_pending_csv_ingestion_jobs(
+    db: Session,
+    *,
+    limit: int | None = None,
+    runner_id: str = "manual-api",
+    discover: bool = True,
+) -> dict[str, Any]:
+    discovery_summary = discover_local_csv_ingestion_jobs(db) if discover else None
+    pending_jobs = db.scalars(
+        select(CsvIngestionJob)
+        .where(CsvIngestionJob.status == "pending")
+        .order_by(CsvIngestionJob.requested_at.asc(), CsvIngestionJob.id.asc())
+        .limit(limit or 1000)
+    ).all()
+    if not pending_jobs:
+        return {
+            "requested_limit": limit,
+            "completed_count": 0,
+            "failed_count": 0,
+            "jobs": [],
+            "discovery": discovery_summary,
+            "backlog": get_csv_ingestion_backlog(db),
+        }
+
+    results: list[dict[str, Any]] = []
+    for job in pending_jobs:
+        results.append(run_csv_ingestion_job(db, job.id, runner_id=runner_id))
+
+    return {
+        "requested_limit": limit,
+        "completed_count": sum(1 for item in results if item["status"] == "completed"),
+        "failed_count": sum(1 for item in results if item["status"] == "failed"),
+        "jobs": results,
+        "discovery": discovery_summary,
+        "backlog": get_csv_ingestion_backlog(db),
+    }
+
+
+def run_csv_ingestion_job(db: Session, job_id: str, *, runner_id: str = "manual-api") -> dict[str, Any]:
+    job_query = select(CsvIngestionJob).where(CsvIngestionJob.id == job_id)
+    if _supports_row_locking(db):
+        job_query = job_query.with_for_update()
+    job = db.scalar(job_query)
+    if job is None:
+        raise ValueError(f"CSV ingestion job not found: {job_id}")
+
+    if job.status == "completed":
+        payload = serialize_csv_ingestion_job(job)
+        db.rollback()
+        return payload
+    if job.status == "running":
+        payload = serialize_csv_ingestion_job(job)
+        db.rollback()
+        return payload
+
+    path = Path(job.source_path)
+    if not path.exists():
+        now = utc_now()
+        job.status = "failed"
+        job.runner_id = runner_id
+        job.error_message = f"CSV file not found: {path}"
+        job.started_at = now
+        job.completed_at = now
         db.add(job)
         db.commit()
-        db.refresh(job)
+        return serialize_csv_ingestion_job(job)
 
+    strategy = _csv_ingestion_strategy(db)
+    job.status = "running"
+    job.runner_id = runner_id
+    job.rows_seen = 0
+    job.rows_staged = 0
+    job.rows_inserted = 0
+    job.rows_filtered = 0
+    job.coverage_start_ms = None
+    job.coverage_end_ms = None
+    job.error_message = None
+    job.started_at = utc_now()
+    job.completed_at = None
+    job.notes_json = {
+        **_build_csv_job_notes(path),
+        **(job.notes_json or {}),
+        "ingest_strategy": strategy,
+    }
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    metrics: dict[str, Any] = {}
+    try:
+        metrics = _ingest_csv_file(db, path)
+        job.status = "completed"
+        job.rows_seen = metrics["rows_seen"]
+        job.rows_staged = metrics["rows_staged"]
+        job.rows_inserted = metrics["rows_inserted"]
+        job.rows_filtered = metrics["rows_filtered"]
+        job.coverage_start_ms = metrics["coverage_start_ms"]
+        job.coverage_end_ms = metrics["coverage_end_ms"]
+        job.notes_json = {
+            **(job.notes_json or {}),
+            "ingest_strategy": metrics["ingest_strategy"],
+        }
+        logger.info(
+            "CSV ingest completed: %s (rows_seen=%s rows_staged=%s rows_inserted=%s rows_filtered=%s)",
+            path.name,
+            metrics["rows_seen"],
+            metrics["rows_staged"],
+            metrics["rows_inserted"],
+            metrics["rows_filtered"],
+        )
+    except Exception as exc:
+        db.rollback()
+        job.status = "failed"
+        job.rows_seen = int(metrics.get("rows_seen") or 0)
+        job.rows_staged = int(metrics.get("rows_staged") or 0)
+        job.rows_inserted = int(metrics.get("rows_inserted") or 0)
+        job.rows_filtered = int(metrics.get("rows_filtered") or 0)
+        job.coverage_start_ms = metrics.get("coverage_start_ms")
+        job.coverage_end_ms = metrics.get("coverage_end_ms")
+        job.error_message = str(exc)
+        logger.exception("CSV ingest failed for %s", path)
+    job.completed_at = utc_now()
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return serialize_csv_ingestion_job(job)
+
+
+def serialize_csv_ingestion_job(job: CsvIngestionJob) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "source_path": job.source_path,
+        "status": job.status,
+        "requested_at_ms": datetime_to_ms(job.requested_at),
+        "started_at_ms": datetime_to_ms(job.started_at) if job.started_at else None,
+        "completed_at_ms": datetime_to_ms(job.completed_at) if job.completed_at else None,
+        "runner_id": job.runner_id,
+        "rows_seen": job.rows_seen,
+        "rows_staged": job.rows_staged,
+        "rows_inserted": job.rows_inserted,
+        "rows_filtered": job.rows_filtered,
+        "coverage_start_ms": job.coverage_start_ms,
+        "coverage_end_ms": job.coverage_end_ms,
+        "error_message": job.error_message,
+        "notes": job.notes_json or {},
+    }
+
+
+def _ingest_csv_file(db: Session, path: Path) -> dict[str, Any]:
+    with bulk_operation_session(db):
+        dialect_name = (db.bind.dialect.name if db.bind is not None else "").lower()
+        if dialect_name == "postgresql":
+            return _ingest_csv_file_via_postgresql_staging(db, path)
+        return _ingest_csv_file_via_batched_inserts(db, path)
+
+
+def _ingest_csv_file_via_batched_inserts(db: Session, path: Path) -> dict[str, Any]:
     rows_seen = 0
     rows_filtered = 0
     rows_inserted = 0
@@ -179,78 +349,181 @@ def ingest_csv_file(db: Session, path: Path, fingerprint: str) -> None:
     batch: list[dict[str, Any]] = []
     now = utc_now()
 
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for raw_row in reader:
-                rows_seen += 1
-                normalized = normalize_csv_row(raw_row, now)
-                if normalized is None:
-                    rows_filtered += 1
-                    continue
-                ot = normalized["open_time_ms"]
-                coverage_start_ms = ot if coverage_start_ms is None else min(coverage_start_ms, ot)
-                coverage_end_ms = ot if coverage_end_ms is None else max(coverage_end_ms, ot)
-                batch.append(normalized)
-                if len(batch) >= BULK_BATCH_SIZE:
-                    rows_inserted += _flush_batch(db, batch)
-                    batch.clear()
-            if batch:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            rows_seen += 1
+            normalized = normalize_csv_row(raw_row, now)
+            if normalized is None:
+                rows_filtered += 1
+                continue
+            open_time_ms = normalized["open_time_ms"]
+            coverage_start_ms = open_time_ms if coverage_start_ms is None else min(coverage_start_ms, open_time_ms)
+            coverage_end_ms = open_time_ms if coverage_end_ms is None else max(coverage_end_ms, open_time_ms)
+            batch.append(normalized)
+            if len(batch) >= BULK_BATCH_SIZE:
                 rows_inserted += _flush_batch(db, batch)
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        job.status = "failed"
-        job.rows_seen = rows_seen
-        job.rows_filtered = rows_filtered
-        job.rows_inserted = rows_inserted
-        job.error_message = str(exc)
-        job.completed_at = utc_now()
-        db.add(job)
-        db.commit()
-        raise
+                batch.clear()
+        if batch:
+            rows_inserted += _flush_batch(db, batch)
 
-    job.status = "completed"
-    job.rows_seen = rows_seen
-    job.rows_filtered = rows_filtered
-    job.rows_inserted = rows_inserted
-    job.coverage_start_ms = coverage_start_ms
-    job.coverage_end_ms = coverage_end_ms
-    job.completed_at = utc_now()
-    db.add(job)
-    db.commit()
-    logger.info(
-        "CSV import completed: %s (rows_seen=%s rows_inserted=%s rows_filtered=%s)",
-        path.name,
-        rows_seen,
-        rows_inserted,
-        rows_filtered,
+    return {
+        "rows_seen": rows_seen,
+        "rows_staged": rows_seen - rows_filtered,
+        "rows_inserted": rows_inserted,
+        "rows_filtered": rows_filtered,
+        "coverage_start_ms": coverage_start_ms,
+        "coverage_end_ms": coverage_end_ms,
+        "ingest_strategy": "batched_insert",
+    }
+
+
+def _ingest_csv_file_via_postgresql_staging(db: Session, path: Path) -> dict[str, Any]:
+    connection = db.connection()
+    _create_market_candle_stage_table(connection, _CSV_INGEST_STAGE_TABLE)
+
+    rows_seen = 0
+    rows_filtered = 0
+    rows_staged = 0
+    coverage_start_ms: int | None = None
+    coverage_end_ms: int | None = None
+    now = utc_now()
+    copy_sql = f"COPY {_CSV_INGEST_STAGE_TABLE} ({', '.join(_CSV_INGEST_STAGE_COLUMNS)}) FROM STDIN"
+    driver_connection = connection.connection.driver_connection
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        with driver_connection.cursor() as cursor:
+            with cursor.copy(copy_sql) as copy:
+                for raw_row in reader:
+                    rows_seen += 1
+                    normalized = normalize_csv_row(raw_row, now)
+                    if normalized is None:
+                        rows_filtered += 1
+                        continue
+                    open_time_ms = normalized["open_time_ms"]
+                    coverage_start_ms = open_time_ms if coverage_start_ms is None else min(coverage_start_ms, open_time_ms)
+                    coverage_end_ms = open_time_ms if coverage_end_ms is None else max(coverage_end_ms, open_time_ms)
+                    copy.write_row(tuple(normalized[column] for column in _CSV_INGEST_STAGE_COLUMNS))
+                    rows_staged += 1
+
+    rows_inserted = _merge_stage_into_market_candles(connection, _CSV_INGEST_STAGE_TABLE)
+    return {
+        "rows_seen": rows_seen,
+        "rows_staged": rows_staged,
+        "rows_inserted": rows_inserted,
+        "rows_filtered": rows_filtered,
+        "coverage_start_ms": coverage_start_ms,
+        "coverage_end_ms": coverage_end_ms,
+        "ingest_strategy": "postgresql_copy_merge",
+    }
+
+
+def _create_market_candle_stage_table(connection, stage_table_name: str) -> None:
+    connection.exec_driver_sql(f"DROP TABLE IF EXISTS {stage_table_name}")
+    connection.exec_driver_sql(
+        f"""
+        CREATE TEMP TABLE {stage_table_name} (
+            exchange VARCHAR(16) NOT NULL,
+            market_symbol VARCHAR(128) NOT NULL,
+            base_symbol VARCHAR(64) NOT NULL,
+            quote_asset VARCHAR(16) NOT NULL,
+            instrument_type VARCHAR(16) NOT NULL,
+            timeframe VARCHAR(16) NOT NULL,
+            open_time_ms BIGINT NOT NULL,
+            open DOUBLE PRECISION NOT NULL,
+            high DOUBLE PRECISION NOT NULL,
+            low DOUBLE PRECISION NOT NULL,
+            close DOUBLE PRECISION NOT NULL,
+            vol DOUBLE PRECISION NOT NULL,
+            vol_ccy DOUBLE PRECISION,
+            vol_quote DOUBLE PRECISION,
+            confirm BOOLEAN NOT NULL,
+            is_old_contract BOOLEAN NOT NULL,
+            source VARCHAR(32) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+        ) ON COMMIT DROP
+        """
     )
+
+
+def _merge_stage_into_market_candles(connection, stage_table_name: str) -> int:
+    columns_sql = ", ".join(_CSV_INGEST_STAGE_COLUMNS)
+    return int(
+        connection.execute(
+            text(
+                f"""
+                WITH inserted AS (
+                    INSERT INTO market_candles ({columns_sql})
+                    SELECT {columns_sql}
+                    FROM {stage_table_name}
+                    ON CONFLICT (exchange, market_symbol, timeframe, open_time_ms) DO NOTHING
+                    RETURNING 1
+                )
+                SELECT count(*) FROM inserted
+                """
+            )
+        ).scalar_one()
+    )
+
+
+def _build_csv_job_notes(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "source_kind": "csv_seed",
+        "timeframe": settings.historical_base_timeframe,
+        "file_size_bytes": stat.st_size,
+        "file_modified_at_ms": stat.st_mtime_ns // 1_000_000,
+    }
+
+
+def _csv_ingestion_strategy(db: Session) -> str:
+    dialect_name = (db.bind.dialect.name if db.bind is not None else "").lower()
+    if dialect_name == "postgresql":
+        return "postgresql_copy_merge"
+    return "test_batch_insert"
 
 
 def _flush_batch(db: Session, batch: list[dict[str, Any]]) -> int:
     """Execute insert statements for a batch without committing (caller commits)."""
     if not batch:
         return 0
-    column_count = max(len(batch[0]), 1)
-    chunk_size = max(SQLITE_MAX_VARS // column_count, 1)
-    total = 0
-    for i in range(0, len(batch), chunk_size):
-        chunk = batch[i : i + chunk_size]
-        stmt = sqlite_insert(MarketCandle).values(chunk)
+    dialect_name = (db.bind.dialect.name if db.bind is not None else "").lower()
+    if dialect_name == "postgresql" and len(batch) >= POSTGRESQL_STAGE_MIN_ROWS:
+        return _flush_batch_postgresql_stage(db, batch)
+
+    if dialect_name == "postgresql":
+        stmt = postgresql_insert(MarketCandle).values(batch)
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["exchange", "market_symbol", "timeframe", "open_time_ms"]
         )
         result = db.execute(stmt)
-        total += int(result.rowcount or 0)
-    return total
+        return int(result.rowcount or 0)
+
+    # The production runtime rejects non-PostgreSQL engines at startup; keep a
+    # minimal fallback here so isolated unit tests can exercise market-data logic.
+    db.bulk_insert_mappings(MarketCandle, batch, render_nulls=True)
+    return len(batch)
 
 
 def insert_candle_batch(db: Session, batch: list[dict[str, Any]]) -> int:
     """Public API used by OKX incremental sync (commits per batch)."""
-    total = _flush_batch(db, batch)
-    db.commit()
-    return total
+    with bulk_operation_session(db):
+        total = _flush_batch(db, batch)
+        db.commit()
+        return total
+
+
+def _flush_batch_postgresql_stage(db: Session, batch: list[dict[str, Any]]) -> int:
+    connection = db.connection()
+    _create_market_candle_stage_table(connection, _MARKET_CANDLE_BATCH_STAGE_TABLE)
+    driver_connection = connection.connection.driver_connection
+    copy_sql = f"COPY {_MARKET_CANDLE_BATCH_STAGE_TABLE} ({', '.join(_CSV_INGEST_STAGE_COLUMNS)}) FROM STDIN"
+    with driver_connection.cursor() as cursor:
+        with cursor.copy(copy_sql) as copy:
+            for row in batch:
+                copy.write_row(tuple(row[column] for column in _CSV_INGEST_STAGE_COLUMNS))
+    return _merge_stage_into_market_candles(connection, _MARKET_CANDLE_BATCH_STAGE_TABLE)
 
 
 def normalize_csv_row(row: dict[str, str], now: datetime | None = None) -> dict[str, Any] | None:
@@ -756,6 +1029,7 @@ def bootstrap_recent_symbol_from_okx(db: Session, base_symbol: str, *, cutoff_ms
     oldest_page_ms: int | None = None
     page_count = 0
     after_cursor: int | None = None
+    pending_rows: list[dict[str, Any]] = []
 
     while page_count < settings.market_sync_symbol_max_pages_per_run:
         candles = fetch_okx_history_candles_with_retry(base_symbol, after_open_time_ms=after_cursor)
@@ -763,7 +1037,10 @@ def bootstrap_recent_symbol_from_okx(db: Session, base_symbol: str, *, cutoff_ms
             break
         parsed_rows, page_min_ms, page_max_ms = build_okx_candle_rows(base_symbol, candles, min_open_time_ms=start_ms, max_open_time_ms=cutoff_ms)
         if parsed_rows:
-            inserted_rows += insert_candle_batch(db, parsed_rows)
+            pending_rows.extend(parsed_rows)
+            if len(pending_rows) >= POSTGRESQL_STAGE_MIN_ROWS:
+                inserted_rows += insert_candle_batch(db, pending_rows)
+                pending_rows.clear()
             latest_synced_ms = page_max_ms if latest_synced_ms is None else max(latest_synced_ms, page_max_ms)
         page_count += 1
         if page_min_ms is None:
@@ -773,6 +1050,9 @@ def bootstrap_recent_symbol_from_okx(db: Session, base_symbol: str, *, cutoff_ms
             break
         after_cursor = oldest_page_ms
         time.sleep(settings.okx_request_pause_seconds)
+
+    if pending_rows:
+        inserted_rows += insert_candle_batch(db, pending_rows)
 
     return inserted_rows, latest_synced_ms, page_count
 
@@ -789,18 +1069,24 @@ def sync_symbol_from_okx(
     inserted_rows = 0
     page_count = 0
     max_page_budget = max_pages or settings.market_sync_symbol_max_pages_per_run
+    pending_rows: list[dict[str, Any]] = []
     while cursor_ms < cutoff_ms and page_count < max_page_budget:
         candles = fetch_okx_history_candles_with_retry(base_symbol, before_open_time_ms=cursor_ms)
         if not candles:
             break
         parsed_rows, _, page_max_ms = build_okx_candle_rows(base_symbol, candles, min_open_time_ms=cursor_ms + 1, max_open_time_ms=cutoff_ms)
         if parsed_rows:
-            inserted_rows += insert_candle_batch(db, parsed_rows)
+            pending_rows.extend(parsed_rows)
+            if len(pending_rows) >= POSTGRESQL_STAGE_MIN_ROWS:
+                inserted_rows += insert_candle_batch(db, pending_rows)
+                pending_rows.clear()
         if page_max_ms is None or page_max_ms <= cursor_ms:
             break
         cursor_ms = page_max_ms
         page_count += 1
         time.sleep(settings.okx_request_pause_seconds)
+    if pending_rows:
+        inserted_rows += insert_candle_batch(db, pending_rows)
     budget_hit = page_count >= max_page_budget and cursor_ms < cutoff_ms
     logger.info(
         "OKX symbol sync finished for %s from %s to %s (inserted_rows=%s page_count=%s)",
@@ -1218,6 +1504,13 @@ def _target_sync_interval_seconds(priority_tier: str) -> float:
 def build_source_fingerprint(path: Path) -> str:
     stat = path.stat()
     return f"{path.resolve()}::{stat.st_size}::{stat.st_mtime_ns}"
+
+
+def _supports_row_locking(db: Session) -> bool:
+    bind = db.get_bind()
+    if bind is None:
+        return False
+    return bind.dialect.name == "postgresql"
 
 
 def parse_optional_float(value: str | float | None) -> float | None:

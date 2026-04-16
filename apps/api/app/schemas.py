@@ -22,6 +22,7 @@ class ExecutionProgressResponse(BaseModel):
 
 class ExecutionControlRequest(BaseModel):
     action: str = Field(min_length=1)
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class SkillResponse(BaseModel):
@@ -76,12 +77,17 @@ class TraceResponse(BaseModel):
 class BacktestResponse(BaseModel):
     id: str
     skill_id: str
+    revision: int = 1
     status: str
     scope: str
     benchmark_name: str
     start_time_ms: int
     end_time_ms: int
     initial_capital: float
+    claim_owner: str | None = None
+    claim_expires_at_ms: int | None = None
+    run_started_at_ms: int | None = None
+    finished_at_ms: int | None = None
     progress: ExecutionProgressResponse = Field(default_factory=ExecutionProgressResponse)
     pending_action: str | None = None
     available_actions: list[str] = Field(default_factory=list)
@@ -100,13 +106,17 @@ class LiveTaskCreateRequest(BaseModel):
 class LiveTaskResponse(BaseModel):
     id: str
     skill_id: str
+    revision: int = 1
     status: str
     cadence: str
     cadence_seconds: int
+    claim_owner: str | None = None
+    claim_expires_at_ms: int | None = None
     available_actions: list[str] = Field(default_factory=list)
     last_activity_at_ms: int | None = None
     last_triggered_at_ms: int | None
     last_completed_slot_as_of_ms: int | None = None
+    last_claimed_slot_as_of_ms: int | None = None
     created_at_ms: int
     updated_at_ms: int
 
@@ -115,16 +125,37 @@ class LiveSignalResponse(BaseModel):
     id: str
     live_task_id: str
     trigger_time_ms: int
+    execution_time_ms: int
+    dispatch_as_of_ms: int | None = None
+    trigger_origin: str
     delivery_status: str
     signal: dict[str, Any]
     created_at_ms: int
+
+
+class DatabaseHealthResponse(BaseModel):
+    url: str
+    backend: str
+    driver: str
+    status: str
+    server_version: str | None = None
+    current_revision: str | None = None
+    required_revision: str | None = None
+    compatible: bool = False
+    writable: bool = False
+    in_recovery: bool | None = None
+    pool: dict[str, Any] = Field(default_factory=dict)
+    market_candle_partitions: list[str] = Field(default_factory=list)
+    error: str | None = None
 
 
 class HealthResponse(BaseModel):
     name: str
     status: str
     database_url: str
+    database: DatabaseHealthResponse
     agent_runner_base_url: str
+    ingest_backlog: dict[str, Any] = Field(default_factory=dict)
     market_sync: dict[str, Any] = Field(default_factory=dict)
     market_sync_loop_running: bool
     last_sync_started_at_ms: int | None = None
@@ -132,6 +163,51 @@ class HealthResponse(BaseModel):
     last_sync_status: str | None = None
     last_sync_error: str | None = None
     server_time_ms: int
+
+
+class CsvIngestionJobResponse(BaseModel):
+    id: str
+    source_path: str
+    status: str
+    requested_at_ms: int
+    started_at_ms: int | None = None
+    completed_at_ms: int | None = None
+    runner_id: str | None = None
+    rows_seen: int = 0
+    rows_staged: int = 0
+    rows_inserted: int = 0
+    rows_filtered: int = 0
+    coverage_start_ms: int | None = None
+    coverage_end_ms: int | None = None
+    error_message: str | None = None
+    notes: dict[str, Any] = Field(default_factory=dict)
+
+
+class CsvIngestionBacklogResponse(BaseModel):
+    status: str
+    pending_count: int = 0
+    running_count: int = 0
+    failed_count: int = 0
+    completed_count: int = 0
+    oldest_pending_requested_at_ms: int | None = None
+    latest_completed_at_ms: int | None = None
+    pending_paths_sample: list[str] = Field(default_factory=list)
+
+
+class CsvIngestionDiscoveryResponse(BaseModel):
+    scanned_count: int
+    discovered_count: int
+    jobs: list[CsvIngestionJobResponse] = Field(default_factory=list)
+    backlog: CsvIngestionBacklogResponse
+
+
+class CsvIngestionRunResponse(BaseModel):
+    requested_limit: int | None = None
+    completed_count: int = 0
+    failed_count: int = 0
+    jobs: list[CsvIngestionJobResponse] = Field(default_factory=list)
+    discovery: CsvIngestionDiscoveryResponse | None = None
+    backlog: CsvIngestionBacklogResponse
 
 
 class MarketCandleResponse(BaseModel):
@@ -158,7 +234,8 @@ class MarketOverviewResponse(BaseModel):
     coverage_start_ms: int | None
     coverage_end_ms: int | None
     coverage_ranges: list[dict[str, int]] = Field(default_factory=list)
-    recent_csv_jobs: list[dict[str, Any]]
+    recent_csv_jobs: list[CsvIngestionJobResponse]
+    ingest_backlog: CsvIngestionBacklogResponse
     sync_cursors: list[dict[str, Any]]
     tier1_freshness_ms_p95: int | None = None
     tier2_freshness_ms_p95: int | None = None
@@ -180,6 +257,7 @@ class MarketSyncStatusResponse(BaseModel):
     missing_symbol_count: int = 0
     missing_symbols_sample: list[str] = Field(default_factory=list)
     universe_version: int | None = None
+    ingest_backlog: CsvIngestionBacklogResponse
     latest_snapshot: dict[str, Any] = Field(default_factory=dict)
     recent_errors: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -50,6 +50,7 @@ from app.services.live_service import (
 from app.services.market_data_sync import MarketSyncSweepResult
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, LIVE_SCOPE_KIND
 from app.services.serializers import trace_to_dict
+from app.services.utils import datetime_to_ms
 
 
 class ExecutionLifecycleTests(unittest.TestCase):
@@ -642,6 +643,63 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     service.control_run(completed_id, "resume")
 
+    def test_backtest_control_rejects_stale_expected_revision(self) -> None:
+        skill = self.create_skill(title="Backtest Revision Guard")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=30)
+        trigger_times = [start_time, start_time + timedelta(minutes=15)]
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+        ):
+            with self.session_factory() as db:
+                created = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)
+                run_id = created["id"]
+                current_revision = created["revision"]
+
+        with self.session_factory() as db:
+            updated, _ = BacktestService(db).control_run(run_id, "pause", expected_revision=current_revision)
+            self.assertEqual(updated["status"], BACKTEST_STATUS_PAUSED)
+
+        with self.session_factory() as db:
+            with self.assertRaisesRegex(ValueError, "revision conflict"):
+                BacktestService(db).control_run(run_id, "resume", expected_revision=current_revision)
+
+    def test_backtest_job_skips_when_unexpired_claim_exists(self) -> None:
+        skill = self.create_skill(title="Backtest Claim Guard")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=30)
+        trigger_times = [start_time, start_time + timedelta(minutes=15)]
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                run_id = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)["id"]
+                run = db.get(BacktestRun, run_id)
+                self.assertIsNotNone(run)
+                assert run is not None
+                run.status = BACKTEST_STATUS_RUNNING
+                run.claim_owner = "other-worker"
+                run.claim_token = "busy-claim"
+                run.claim_acquired_at = datetime.now(timezone.utc)
+                run.claim_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+                db.add(run)
+                db.commit()
+
+            execute_backtest_job(run_id)
+
+        self.assertEqual(self.count_rows(RunTrace, RunTrace.run_id == run_id), 0)
+
     def test_backtest_rolls_back_state_patch_when_execution_fails_after_agent_response(self) -> None:
         skill = self.create_skill(title="Backtest State Rollback")
         start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -819,6 +877,38 @@ class ExecutionLifecycleTests(unittest.TestCase):
             assert task is not None
             self.assertEqual(task.last_completed_slot_as_of_ms, 1_710_000_900_000)
 
+    def test_live_runtime_same_slot_returns_existing_signal_without_duplicate_write(self) -> None:
+        skill = self.create_skill(title="Live Idempotent Slot")
+        response_payload = {
+            "decision": {"action": "skip"},
+            "reasoning_summary": "Keep the current position.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch(
+                "app.services.live_service.build_market_snapshot_for_live",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch(
+                "app.services.live_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ),
+        ):
+            first_signal = execute_live_task(task_id, slot_as_of_ms=1_710_010_000_000, raise_on_reject=True)
+            second_signal = execute_live_task(task_id, slot_as_of_ms=1_710_010_000_000, raise_on_reject=True)
+
+        self.assertIsNotNone(first_signal)
+        self.assertIsNotNone(second_signal)
+        assert first_signal is not None and second_signal is not None
+        self.assertEqual(first_signal["id"], second_signal["id"])
+        self.assertEqual(self.count_rows(LiveSignal, LiveSignal.live_task_id == task_id), 1)
+
     def test_live_runtime_failed_retry_keeps_task_active(self) -> None:
         skill = self.create_skill(title="Live Failure Skill")
         final_error = AgentRunnerRequestError(
@@ -860,6 +950,22 @@ class ExecutionLifecycleTests(unittest.TestCase):
             assert task is not None
             self.assertEqual(task.status, LIVE_STATUS_ACTIVE)
             self.assertIsNone(task.last_completed_slot_as_of_ms)
+
+    def test_live_control_rejects_stale_expected_revision(self) -> None:
+        skill = self.create_skill(title="Live Revision Guard")
+        with self.session_factory() as db:
+            service = LiveTaskService(db)
+            created = service.create_task(skill.id)
+            task_id = created["id"]
+            current_revision = created["revision"]
+
+        with self.session_factory() as db:
+            updated = LiveTaskService(db).control_task(task_id, "pause", expected_revision=current_revision)
+            self.assertEqual(updated["status"], LIVE_STATUS_PAUSED)
+
+        with self.session_factory() as db:
+            with self.assertRaisesRegex(ValueError, "revision conflict"):
+                LiveTaskService(db).control_task(task_id, "resume", expected_revision=current_revision)
 
     def test_live_runtime_rolls_back_state_patch_when_execution_fails_after_agent_response(self) -> None:
         skill = self.create_skill(title="Live State Rollback")
@@ -1276,6 +1382,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
                         id=self.make_id("sig"),
                         live_task_id=live_task.id,
                         trigger_time=datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc),
+                        execution_time_ms=datetime_to_ms(datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc)),
                         signal_json={"decision": {"action": "skip"}},
                         delivery_status="stored",
                     ),

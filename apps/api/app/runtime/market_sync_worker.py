@@ -6,8 +6,8 @@ import time
 from typing import Any
 
 from app.core.config import settings
-from app.core.database import Base, SessionLocal, engine
-from app.main import ensure_runtime_schema
+from app.core.database import SessionLocal
+from app.core.schema import ensure_runtime_storage_compatible
 from app.runtime.market_sync_queue import (
     COVERAGE_LOCK_KEY,
     LIVE_DISPATCH_LOCK_KEY,
@@ -28,6 +28,7 @@ from app.services.market_data_sync import (
     select_due_sync_states,
     sync_market_symbol,
 )
+from app.services.partitioning import ensure_market_candle_partitions
 from app.services.utils import datetime_to_ms, utc_now
 
 logger = logging.getLogger(__name__)
@@ -45,8 +46,9 @@ class MarketSyncWorker:
 
     def run_forever(self) -> None:
         logger.info("Starting market sync worker %s", self.worker_id)
-        Base.metadata.create_all(bind=engine)
-        ensure_runtime_schema()
+        ensure_runtime_storage_compatible()
+        with SessionLocal() as db:
+            ensure_market_candle_partitions(db)
         while True:
             try:
                 self._scheduler_tick()

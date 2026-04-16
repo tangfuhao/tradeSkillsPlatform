@@ -52,3 +52,4 @@ stop_service worker
 stop_service api
 stop_service runner
 stop_service redis
+stop_service postgres

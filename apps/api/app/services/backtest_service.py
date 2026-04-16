@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import socket
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -104,10 +108,12 @@ class BacktestService:
         )
         return engine.get_portfolio_state()
 
-    def control_run(self, run_id: str, action: str) -> tuple[dict[str, Any], bool]:
-        run = self.db.get(BacktestRun, run_id)
+    def control_run(self, run_id: str, action: str, *, expected_revision: int | None = None) -> tuple[dict[str, Any], bool]:
+        run = self.db.scalar(select(BacktestRun).where(BacktestRun.id == run_id).with_for_update())
         if run is None:
             raise LookupError("Backtest run not found.")
+        if expected_revision is not None and run.revision != expected_revision:
+            raise ValueError(f"Backtest revision conflict: expected {expected_revision}, current {run.revision}.")
 
         normalized = action.strip().lower()
         should_enqueue = False
@@ -150,7 +156,11 @@ class BacktestService:
 
         run.updated_at = utc_now()
         self.db.add(run)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except StaleDataError as exc:
+            self.db.rollback()
+            raise ValueError("Backtest changed concurrently; refresh and retry.") from exc
         self.db.refresh(run)
         return backtest_to_dict(run), should_enqueue
 
@@ -166,13 +176,14 @@ class BacktestService:
 
 
 def execute_backtest_job(run_id: str) -> None:
+    claim_token: str | None = None
     with SessionLocal() as db:
-        run = db.get(BacktestRun, run_id)
-        if run is None or run.status not in {BACKTEST_STATUS_QUEUED, BACKTEST_STATUS_RUNNING}:
+        claim = _claim_backtest_run(db, run_id)
+        if claim is None:
             return
-        skill = db.get(Skill, run.skill_id)
+        run, skill, claim_token = claim
         if skill is None:
-            _mark_run_failed(db, run_id, "Skill missing for backtest run.")
+            _mark_run_failed(db, run_id, "Skill missing for backtest run.", claim_token=claim_token)
             return
 
         engine = PortfolioEngine(
@@ -187,21 +198,18 @@ def execute_backtest_job(run_id: str) -> None:
             envelope = skill.envelope_json or {}
             cadence = envelope.get("trigger", {}).get("value", "15m")
             trigger_times, truncated = build_trigger_times(run.start_time, run.end_time, cadence)
+            run = _load_backtest_run_for_claim(db, run_id, claim_token)
+            if run is None:
+                return
             run.total_trigger_count = len(trigger_times)
-            run.status = BACKTEST_STATUS_RUNNING
-            run.error_message = None
-            run.last_runtime_error_json = None
             db.add(run)
-
-            if run.completed_trigger_count == 0:
-                _reset_run_execution_state(db, run, engine)
             db.commit()
 
             equity_curve = _load_existing_equity_curve(db, run_id, run.initial_capital)
             market_data_provider = "historical_db"
 
             for trace_index in range(int(run.completed_trigger_count or 0), len(trigger_times)):
-                if _stop_backtest_if_requested(db, run_id):
+                if _stop_backtest_if_requested(db, run_id, claim_token=claim_token):
                     return
 
                 trigger_time = trigger_times[trace_index]
@@ -242,7 +250,7 @@ def execute_backtest_job(run_id: str) -> None:
                     agent_response, recovery = execute_agent_run_with_recovery(
                         payload,
                         mode="backtest",
-                        should_abort=lambda: _backtest_retry_should_abort(db, run_id),
+                        should_abort=lambda: _backtest_retry_should_abort(db, run_id, claim_token=claim_token),
                     )
                     decision = dict(agent_response["decision"])
                     state_patch = decision.get("state_patch") or {}
@@ -296,20 +304,32 @@ def execute_backtest_job(run_id: str) -> None:
                     if state_patch:
                         engine.save_strategy_state(state_patch)
 
-                    persisted_run = db.get(BacktestRun, run_id)
+                    persisted_run = _load_backtest_run_for_claim(db, run_id, claim_token)
                     if persisted_run is None:
+                        db.rollback()
                         return
                     persisted_run.completed_trigger_count = trace_index + 1
                     persisted_run.last_processed_trace_index = trace_index
                     persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_time)
                     persisted_run.last_runtime_error_json = None
-                    persisted_run.updated_at = utc_now()
+                    heartbeat_at = utc_now()
+                    persisted_run.last_heartbeat_at = heartbeat_at
+                    persisted_run.claim_expires_at = heartbeat_at + timedelta(
+                        seconds=settings.backtest_run_claim_ttl_seconds
+                    )
+                    persisted_run.updated_at = heartbeat_at
                     db.add(persisted_run)
-                    db.commit()
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        db.rollback()
+                        if _backtest_retry_should_abort(db, run_id, claim_token=claim_token):
+                            return
+                        raise
                     equity_curve.append(float((portfolio_after.get("account") or {}).get("equity", run.initial_capital)))
                 except AgentRunAborted:
                     db.rollback()
-                    if _stop_backtest_if_requested(db, run_id):
+                    if _stop_backtest_if_requested(db, run_id, claim_token=claim_token):
                         return
                     raise RuntimeError(
                         f"Backtest step {trace_index + 1} at {trigger_time.isoformat()} aborted unexpectedly."
@@ -320,6 +340,7 @@ def execute_backtest_job(run_id: str) -> None:
                         db,
                         run_id,
                         f"Backtest step {trace_index + 1} at {trigger_time.isoformat()} failed: {exc}",
+                        claim_token=claim_token,
                         runtime_error=exc.backtest_runtime_error(
                             failed_trace_index=trace_index,
                             trigger_time_ms=datetime_to_ms(trigger_time),
@@ -345,7 +366,7 @@ def execute_backtest_job(run_id: str) -> None:
                 closed_trade_count=int(stats["closed_trade_count"]),
                 win_rate=float(stats["win_rate"]),
             )
-            persisted_run = db.get(BacktestRun, run_id)
+            persisted_run = _load_backtest_run_for_claim(db, run_id, claim_token)
             if persisted_run is None:
                 return
             persisted_run.summary_json = summary
@@ -355,23 +376,41 @@ def execute_backtest_job(run_id: str) -> None:
             persisted_run.last_processed_trace_index = len(trigger_times) - 1 if trigger_times else None
             persisted_run.last_processed_trigger_time_ms = datetime_to_ms(trigger_times[-1]) if trigger_times else None
             persisted_run.last_runtime_error_json = None
+            persisted_run.claim_token = None
+            persisted_run.claim_owner = None
+            persisted_run.claim_acquired_at = None
+            persisted_run.claim_expires_at = None
+            persisted_run.last_heartbeat_at = utc_now()
+            persisted_run.finished_at = utc_now()
             persisted_run.updated_at = utc_now()
             db.add(persisted_run)
             db.commit()
         except Exception as exc:
             db.rollback()
-            _mark_run_failed(db, run_id, str(exc))
+            _mark_run_failed(db, run_id, str(exc), claim_token=claim_token)
 
 
 
-def _mark_run_failed(db: Session, run_id: str, message: str, *, runtime_error: dict[str, Any] | None = None) -> None:
-    persisted_run = db.get(BacktestRun, run_id)
+def _mark_run_failed(
+    db: Session,
+    run_id: str,
+    message: str,
+    *,
+    claim_token: str | None = None,
+    runtime_error: dict[str, Any] | None = None,
+) -> None:
+    persisted_run = _load_backtest_run_for_claim(db, run_id, claim_token)
     if persisted_run is None:
         return
     persisted_run.status = BACKTEST_STATUS_FAILED
     persisted_run.control_requested = None
     persisted_run.error_message = message
     persisted_run.last_runtime_error_json = runtime_error
+    persisted_run.claim_token = None
+    persisted_run.claim_owner = None
+    persisted_run.claim_acquired_at = None
+    persisted_run.claim_expires_at = None
+    persisted_run.finished_at = utc_now()
     persisted_run.updated_at = utc_now()
     db.add(persisted_run)
     db.commit()
@@ -380,13 +419,18 @@ def _mark_run_failed(db: Session, run_id: str, message: str, *, runtime_error: d
 
 
 
-def _stop_backtest_if_requested(db: Session, run_id: str) -> bool:
+def _stop_backtest_if_requested(db: Session, run_id: str, *, claim_token: str | None = None) -> bool:
     db.expire_all()
-    persisted_run = db.get(BacktestRun, run_id)
+    persisted_run = _load_backtest_run_for_claim(db, run_id, claim_token)
     if persisted_run is None:
         return True
     if persisted_run.status == BACKTEST_STATUS_STOPPING:
         persisted_run.status = BACKTEST_STATUS_STOPPED
+        persisted_run.claim_token = None
+        persisted_run.claim_owner = None
+        persisted_run.claim_acquired_at = None
+        persisted_run.claim_expires_at = None
+        persisted_run.finished_at = utc_now()
         persisted_run.updated_at = utc_now()
         db.add(persisted_run)
         db.commit()
@@ -394,6 +438,10 @@ def _stop_backtest_if_requested(db: Session, run_id: str) -> bool:
     if persisted_run.control_requested == "pause":
         persisted_run.status = BACKTEST_STATUS_PAUSED
         persisted_run.control_requested = None
+        persisted_run.claim_token = None
+        persisted_run.claim_owner = None
+        persisted_run.claim_acquired_at = None
+        persisted_run.claim_expires_at = None
         persisted_run.updated_at = utc_now()
         db.add(persisted_run)
         db.commit()
@@ -401,15 +449,73 @@ def _stop_backtest_if_requested(db: Session, run_id: str) -> bool:
     return persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}
 
 
-def _backtest_retry_should_abort(db: Session, run_id: str) -> bool:
+def _backtest_retry_should_abort(db: Session, run_id: str, *, claim_token: str | None = None) -> bool:
     db.expire_all()
     persisted_run = db.get(BacktestRun, run_id)
     if persisted_run is None:
+        return True
+    if claim_token is not None and persisted_run.claim_token != claim_token:
         return True
     return bool(
         persisted_run.status in {BACKTEST_STATUS_PAUSED, BACKTEST_STATUS_STOPPING, BACKTEST_STATUS_STOPPED, BACKTEST_STATUS_FAILED}
         or persisted_run.control_requested == "pause"
     )
+
+
+def _claim_backtest_run(db: Session, run_id: str) -> tuple[BacktestRun, Skill | None, str] | None:
+    run = db.scalar(select(BacktestRun).where(BacktestRun.id == run_id).with_for_update())
+    if run is None or run.status not in {BACKTEST_STATUS_QUEUED, BACKTEST_STATUS_RUNNING}:
+        db.rollback()
+        return None
+
+    now = utc_now()
+    if run.claim_token and run.claim_expires_at is not None and ensure_utc(run.claim_expires_at) > now:
+        db.rollback()
+        return None
+
+    skill = db.get(Skill, run.skill_id)
+    if run.completed_trigger_count == 0 and skill is not None:
+        engine = PortfolioEngine(
+            db,
+            skill_id=skill.id,
+            scope_kind=BACKTEST_SCOPE_KIND,
+            scope_id=run.id,
+            initial_capital=run.initial_capital,
+        )
+        _reset_run_execution_state(db, run, engine)
+
+    claim_token = new_id("bclaim")
+    run.status = BACKTEST_STATUS_RUNNING
+    run.claim_owner = _execution_owner()
+    run.claim_token = claim_token
+    run.claim_acquired_at = now
+    run.claim_expires_at = now + timedelta(seconds=settings.backtest_run_claim_ttl_seconds)
+    run.run_started_at = run.run_started_at or now
+    run.finished_at = None
+    run.error_message = None
+    run.last_runtime_error_json = None
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run, skill, claim_token
+
+
+def _load_backtest_run_for_claim(
+    db: Session,
+    run_id: str,
+    claim_token: str | None,
+) -> BacktestRun | None:
+    run = db.scalar(
+        select(BacktestRun)
+        .where(BacktestRun.id == run_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if run is None:
+        return None
+    if claim_token is not None and run.claim_token != claim_token:
+        return None
+    return run
 
 def _validate_backtest_window(db: Session, start_time: datetime, end_time: datetime, cadence: str) -> tuple[list[datetime], bool]:
     if end_time <= start_time:
@@ -490,6 +596,12 @@ def _reset_run_execution_state(db: Session, run: BacktestRun, engine: PortfolioE
     run.control_requested = None
     run.last_processed_trace_index = None
     run.last_processed_trigger_time_ms = None
+    run.claim_token = None
+    run.claim_owner = None
+    run.claim_acquired_at = None
+    run.claim_expires_at = None
+    run.last_heartbeat_at = None
+    run.finished_at = None
     run.summary_json = None
     run.last_runtime_error_json = None
     run.error_message = None
@@ -571,3 +683,7 @@ def _build_backtest_summary(
         "replay_steps": replay_steps,
         "truncated_replay": truncated,
     }
+
+
+def _execution_owner() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"

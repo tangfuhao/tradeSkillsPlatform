@@ -77,7 +77,7 @@ def control_live_task(
 ) -> LiveTaskResponse:
     service = LiveTaskService(db)
     try:
-        task = service.control_task(task_id, payload.action)
+        task = service.control_task(task_id, payload.action, expected_revision=payload.expected_revision)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:

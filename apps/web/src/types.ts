@@ -60,7 +60,23 @@ export type ApiHealthResponse = {
   name: string;
   status: string;
   database_url: string;
+  database?: {
+    url: string;
+    backend: string;
+    driver: string;
+    status: string;
+    server_version: string | null;
+    current_revision: string | null;
+    required_revision: string | null;
+    compatible: boolean;
+    writable: boolean;
+    in_recovery: boolean | null;
+    pool: Record<string, unknown>;
+    market_candle_partitions?: string[];
+    error: string | null;
+  };
   agent_runner_base_url: string;
+  ingest_backlog?: CsvIngestionBacklog;
   market_sync: MarketSyncSummary;
   market_sync_loop_running: boolean;
   last_sync_started_at_ms: number | null;
@@ -139,12 +155,17 @@ export type LlmRoundSummary = {
 export type BacktestRun = {
   id: string;
   skill_id: string;
+  revision?: number;
   status: string;
   scope: string;
   benchmark_name: string;
   start_time_ms: number;
   end_time_ms: number;
   initial_capital: number;
+  claim_owner?: string | null;
+  claim_expires_at_ms?: number | null;
+  run_started_at_ms?: number | null;
+  finished_at_ms?: number | null;
   progress: ExecutionProgress;
   pending_action: string | null;
   available_actions: ExecutionAction[];
@@ -230,13 +251,17 @@ export type BacktestTrace = {
 export type LiveTask = {
   id: string;
   skill_id: string;
+  revision?: number;
   status: string;
   cadence: string;
   cadence_seconds: number;
+  claim_owner?: string | null;
+  claim_expires_at_ms?: number | null;
   available_actions: ExecutionAction[];
   last_activity_at_ms: number | null;
   last_triggered_at_ms: number | null;
   last_completed_slot_as_of_ms: number | null;
+  last_claimed_slot_as_of_ms?: number | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -245,6 +270,9 @@ export type LiveSignal = {
   id: string;
   live_task_id: string;
   trigger_time_ms: number;
+  execution_time_ms?: number | null;
+  dispatch_as_of_ms?: number | null;
+  trigger_origin?: string | null;
   delivery_status: string;
   created_at_ms: number;
   signal: {
@@ -272,13 +300,29 @@ export type CsvIngestionJob = {
   id: string;
   source_path: string;
   status: string;
+  requested_at_ms: number;
+  started_at_ms?: number | null;
   rows_seen: number;
+  rows_staged?: number;
   rows_inserted: number;
   rows_filtered: number;
+  runner_id?: string | null;
   coverage_start_ms: number | null;
   coverage_end_ms: number | null;
   completed_at_ms: number | null;
   error_message: string | null;
+  notes?: Record<string, unknown>;
+};
+
+export type CsvIngestionBacklog = {
+  status: string;
+  pending_count: number;
+  running_count: number;
+  failed_count: number;
+  completed_count: number;
+  oldest_pending_requested_at_ms?: number | null;
+  latest_completed_at_ms?: number | null;
+  pending_paths_sample?: string[];
 };
 
 export type MarketSyncCursor = {
@@ -304,6 +348,7 @@ export type MarketOverview = {
   coverage_end_ms: number | null;
   coverage_ranges: MarketCoverageRange[];
   recent_csv_jobs: CsvIngestionJob[];
+  ingest_backlog?: CsvIngestionBacklog;
   sync_cursors: MarketSyncCursor[];
   tier1_freshness_ms_p95?: number | null;
   tier2_freshness_ms_p95?: number | null;

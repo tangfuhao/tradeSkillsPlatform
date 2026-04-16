@@ -13,7 +13,7 @@ This repository is intentionally organized as a monorepo so the web app, API, an
 ```text
 tradeSkills/
 |- apps/
-|  |- api/                FastAPI app, SQLite demo persistence, startup sync, scheduler
+|  |- api/                FastAPI app, PostgreSQL runtime, migrations, market-data APIs
 |  \- web/                Vite + React demo dashboard
 |- services/
 |  \- agent-runner/       Agent execution boundary with OpenAI Responses tool runtime
@@ -43,9 +43,11 @@ What works now:
 - Skill upload, rule-first validation, hybrid envelope extraction, and list/detail APIs
 - Backtest creation, replay execution, summary retrieval, trace retrieval, and backtest portfolio inspection
 - Live task creation, periodic scheduling, manual triggering, recent signal retrieval, and live-task portfolio inspection
-- Blocking startup sync for operator-managed historical market data:
-  1. import local OKX CSV seed files into SQLite
-  2. optionally try small incremental API catch-up for active OKX `USDT-SWAP` symbols
+- PostgreSQL-first runtime storage with Alembic schema migrations, startup compatibility checks, and storage diagnostics in `/api/v1/health`
+- Explicit historical ingest workflow for operator-managed market data:
+  1. discover CSV ingest backlog as durable job records
+  2. bulk load CSV or large backfills through PostgreSQL `COPY` + staging merge
+  3. optionally run small incremental OKX catch-up for active `USDT-SWAP` symbols
 - Historical candle query APIs with dynamic aggregation from stored `1m` bars into `15m`, `4h`, or other intervals
 - React demo dashboard with service pulse, market coverage, skill upload, backtest launch, live task activation, and recent signals
 - Agent Runner service boundary with an OpenAI Responses API tool loop plus structured decision sanitization
@@ -89,7 +91,7 @@ Internal-only endpoints exist under `/api/v1/internal/tool-gateway/*` for the Ag
 
 ## Current data model
 
-The demo persists its runtime state in SQLite. The core tables represented in `apps/api/app/models.py` are:
+The runtime system of record is PostgreSQL. The core tables represented in `apps/api/app/models.py` are:
 
 - `skills`
 - `backtest_runs`
@@ -109,6 +111,8 @@ The demo persists its runtime state in SQLite. The core tables represented in `a
 Notable implementation details:
 
 - The active runtime state path is execution-scoped: `PortfolioEngine` reads and writes `execution_strategy_states` for each `backtest_run` or `live_task`
+- Runtime lifecycle summaries expose revision metadata plus execution claim/lease fields so multiple workers can coordinate safely through PostgreSQL
+- `market_candles` is stored as a PostgreSQL-partitioned append-heavy table with SQL-side aggregation for higher timeframes
 - `skills.review_status` and the `strategy_states` table still exist in the schema as legacy artifacts, but the current public workflow does not use them as review gates
 - Backtest summaries are stored inline on `backtest_runs.summary_json`
 - Live outputs are stored as signal records on `live_signals.signal_json`, with `delivery_status` currently used only to distinguish stored vs failed runs
@@ -121,21 +125,21 @@ The current demo is opinionated around the requirements already clarified in pro
 - Store only `*-USDT-SWAP`
 - Keep `#OLD#` / delisted contracts in historical storage for backtest realism
 - Store base candles as `1m` and derive larger timeframes dynamically at query time
-- Run startup sync in blocking mode so the API is only considered ready after market data sync completes
+- Run startup sync in blocking mode so the API is only considered ready after PostgreSQL schema checks, partition maintenance, and the first market sync sweep complete
 - Protect startup from OKX API rate limits with `TRADE_SKILLS_OKX_INCREMENTAL_MAX_GAP_DAYS`
   - if the gap from local coverage to the target cutoff is too large, the symbol is marked `skipped`
-  - large backfills should be handled by pre-downloaded CSV seed files, not by startup API pagination
-- For UI-first local debugging, you can set `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED=false` so startup still imports local CSVs but skips all OKX API catch-up
+  - large backfills should be handled by explicit CSV ingest jobs, not by startup API pagination
+- For UI-first local debugging, you can set `TRADE_SKILLS_OKX_INCREMENTAL_SYNC_ENABLED=false` so startup skips OKX catch-up while keeping existing PostgreSQL data available
 
 ### Seed-first workflow
 
 Recommended local workflow:
 
 1. Download OKX historical candle CSV files into the sibling `../data` directory.
-2. Start the API.
-3. On startup, the API imports unseen CSVs into SQLite.
-4. After CSV import, the API optionally attempts incremental catch-up only for small missing windows.
-5. The dashboard and `/api/v1/market-data/overview` show what was imported and what was skipped.
+2. Discover pending ingest jobs with `./.venv/bin/python scripts/market_data_ingest.py discover`.
+3. Run the backlog with `./.venv/bin/python scripts/market_data_ingest.py run-pending --limit 1` (or a higher limit for bulk seed loading).
+4. Start the API and let startup optionally attempt incremental catch-up only for small missing windows.
+5. Use `/api/v1/market-data/overview`, `/api/v1/market-data/ingest-jobs`, and `/api/v1/health` to inspect backlog, coverage, and PostgreSQL storage health.
 
 This is designed for a debug-heavy development machine where services restart often.
 
@@ -197,6 +201,8 @@ Bootstrap the local virtual environment plus Python/web dependencies once:
 make bootstrap
 ```
 
+TradeSkills runtime storage now requires PostgreSQL. `make dev-up` can reuse a local server on `127.0.0.1:5432` or bootstrap a local cluster automatically when PostgreSQL is installed on your machine.
+
 Then start the three services in separate terminals if you want foreground logs:
 
 ```bash
@@ -224,10 +230,23 @@ This will:
 - install or refresh Python dependencies when either requirements file changes
 - install or refresh web dependencies when `package.json` or `package-lock.json` changes
 - read `apps/api/.env`, `services/agent-runner/.env`, and `apps/web/.env.local`
+- require PostgreSQL for the runtime database and run `alembic upgrade head` before starting the API
 - reuse an existing Redis on `127.0.0.1:6379`, or start a local `redis-server` automatically when that port is free
 - start the web, API, runner, and market-sync worker in the background
 - write PID files under `.dev/pids`
 - write logs under `.dev/logs`
+
+### Demo data cutover
+
+If you still have legacy demo data in SQLite, migrate it once into PostgreSQL:
+
+```bash
+./.venv/bin/python scripts/migrate_sqlite_to_postgres.py \
+  --source-sqlite-path data/runtime/trade_skills.db \
+  --report-path data/runtime/migration-report.json
+```
+
+The migration tool compares row counts, market-candle coverage, and sample query outputs between SQLite and PostgreSQL. For an operator runbook covering ingest jobs, partition maintenance, health debugging, and rollback/cutover steps, see `docs/postgresql-runtime-operations.md`.
 
 Useful companion commands:
 
@@ -240,6 +259,7 @@ make dev-down
 
 See `infra/env/api.env.example`, especially:
 
+- `TRADE_SKILLS_DATABASE_URL`
 - `TRADE_SKILLS_HISTORICAL_DATA_DIR`
 - `TRADE_SKILLS_HISTORICAL_CSV_GLOB`
 - `TRADE_SKILLS_HISTORICAL_BASE_TIMEFRAME`

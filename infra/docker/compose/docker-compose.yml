@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tradeskills
+      POSTGRES_USER: tradeskills
+      POSTGRES_PASSWORD: tradeskills
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradeskills -d tradeskills"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -19,11 +35,13 @@ services:
       dockerfile: apps/api/Dockerfile
     env_file:
       - ../../env/api.env.example
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "8000:8000"
     volumes:
       - ../../../data:/app/data
     depends_on:
+      - postgres
       - agent-runner
       - redis
 
@@ -37,6 +55,7 @@ services:
     volumes:
       - ../../../data:/app/data
     depends_on:
+      - postgres
       - redis
       - api
 
@@ -50,3 +69,6 @@ services:
       - "5173:5173"
     depends_on:
       - api
+
+volumes:
+  postgres-data:

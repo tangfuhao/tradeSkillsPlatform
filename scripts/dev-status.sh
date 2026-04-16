@@ -50,6 +50,7 @@ show_dependency() {
 }
 
 show_dependency redis 6379 redis://127.0.0.1:6379
+show_dependency postgres 5432 postgresql://127.0.0.1:5432/tradeskills
 show_service runner http://127.0.0.1:8100/healthz
 show_service api http://127.0.0.1:8000/api/v1/health
 show_service worker background

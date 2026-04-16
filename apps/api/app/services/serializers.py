@@ -46,12 +46,17 @@ def backtest_to_dict(run: BacktestRun) -> dict:
     return {
         "id": run.id,
         "skill_id": run.skill_id,
+        "revision": run.revision,
         "status": run.status,
         "scope": run.scope,
         "benchmark_name": run.benchmark_name,
         "start_time_ms": datetime_to_ms(run.start_time),
         "end_time_ms": datetime_to_ms(run.end_time),
         "initial_capital": run.initial_capital,
+        "claim_owner": run.claim_owner,
+        "claim_expires_at_ms": datetime_to_ms(run.claim_expires_at) if run.claim_expires_at else None,
+        "run_started_at_ms": datetime_to_ms(run.run_started_at) if run.run_started_at else None,
+        "finished_at_ms": datetime_to_ms(run.finished_at) if run.finished_at else None,
         "progress": build_progress_payload(
             total_steps=run.total_trigger_count,
             completed_steps=run.completed_trigger_count,
@@ -99,13 +104,19 @@ def live_task_to_dict(task: LiveTask) -> dict:
     return {
         "id": task.id,
         "skill_id": task.skill_id,
+        "revision": task.revision,
         "status": task.status,
         "cadence": task.cadence,
         "cadence_seconds": task.cadence_seconds,
+        "claim_owner": task.execution_claim_owner,
+        "claim_expires_at_ms": (
+            datetime_to_ms(task.execution_claim_expires_at) if task.execution_claim_expires_at else None
+        ),
         "available_actions": live_runtime_available_actions(task.status),
         "last_activity_at_ms": last_activity_at_ms(task.created_at, task.updated_at, extra_ms=last_triggered_at_ms),
         "last_triggered_at_ms": last_triggered_at_ms,
         "last_completed_slot_as_of_ms": task.last_completed_slot_as_of_ms,
+        "last_claimed_slot_as_of_ms": task.last_claimed_slot_as_of_ms,
         "created_at_ms": datetime_to_ms(task.created_at),
         "updated_at_ms": datetime_to_ms(task.updated_at),
     }
@@ -141,6 +152,9 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "id": signal.id,
         "live_task_id": signal.live_task_id,
         "trigger_time_ms": datetime_to_ms(signal.trigger_time),
+        "execution_time_ms": signal.execution_time_ms,
+        "dispatch_as_of_ms": signal.dispatch_as_of_ms,
+        "trigger_origin": signal.trigger_origin,
         "delivery_status": signal.delivery_status,
         "signal": normalized_signal,
         "created_at_ms": datetime_to_ms(signal.created_at),

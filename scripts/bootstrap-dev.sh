@@ -80,12 +80,14 @@ python_dependencies_healthy() {
 import importlib
 
 modules = [
+    "alembic",
     "apscheduler",
     "fastapi",
     "httpx",
     "jsonschema",
     "openai",
     "pydantic_settings",
+    "psycopg",
     "sqlalchemy",
     "uvicorn",
 ]

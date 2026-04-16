@@ -2,53 +2,19 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import inspect, text
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.database import Base, SessionLocal, engine
+from app.core.database import SessionLocal
+from app.core.schema import ensure_runtime_storage_compatible
 from app.runtime.market_sync_queue import build_market_sync_queue
 from app.runtime.market_sync_loop import market_sync_loop_manager
-from app.services.market_data_sync import import_local_csv_seed_data, run_startup_market_data_sync
+from app.services.market_data_sync import discover_local_csv_ingestion_jobs, run_startup_market_data_sync
+from app.services.partitioning import ensure_market_candle_partitions
 from app.services.utils import datetime_to_ms, utc_now
 
 
 logger = logging.getLogger(__name__)
-
-
-def ensure_runtime_schema() -> None:
-    inspector = inspect(engine)
-    table_names = set(inspector.get_table_names())
-    statements: list[str] = []
-
-    if "backtest_runs" in table_names:
-        existing_columns = {column["name"] for column in inspector.get_columns("backtest_runs")}
-
-        if "total_trigger_count" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN total_trigger_count INTEGER NOT NULL DEFAULT 0")
-        if "completed_trigger_count" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN completed_trigger_count INTEGER NOT NULL DEFAULT 0")
-        if "control_requested" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN control_requested VARCHAR(32)")
-        if "last_processed_trace_index" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trace_index INTEGER")
-        if "last_processed_trigger_time_ms" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trigger_time_ms BIGINT")
-        if "last_runtime_error_json" not in existing_columns:
-            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_runtime_error_json JSON")
-
-    if "live_tasks" in table_names:
-        existing_live_columns = {column["name"] for column in inspector.get_columns("live_tasks")}
-        if "last_completed_slot_as_of_ms" not in existing_live_columns:
-            statements.append("ALTER TABLE live_tasks ADD COLUMN last_completed_slot_as_of_ms BIGINT")
-
-    if not statements:
-        return
-
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
-    logger.info("Applied runtime schema bootstrap statements: %s", len(statements))
 
 
 def create_app() -> FastAPI:
@@ -63,18 +29,33 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def on_startup() -> None:
-        Base.metadata.create_all(bind=engine)
-        ensure_runtime_schema()
+        storage_status = ensure_runtime_storage_compatible()
+        logger.info(
+            "Runtime storage ready: backend=%s revision=%s server=%s",
+            storage_status["backend"],
+            storage_status["current_revision"],
+            storage_status["server_version"],
+        )
+        with SessionLocal() as db:
+            partition_status = ensure_market_candle_partitions(db)
+        logger.info("Ensured market candle partitions: %s", partition_status)
+        with SessionLocal() as db:
+            try:
+                discovery_summary = discover_local_csv_ingestion_jobs(db)
+                logger.info(
+                    "Registered CSV ingest backlog: scanned=%s discovered=%s pending=%s running=%s failed=%s",
+                    discovery_summary["scanned_count"],
+                    discovery_summary["discovered_count"],
+                    discovery_summary["backlog"]["pending_count"],
+                    discovery_summary["backlog"]["running_count"],
+                    discovery_summary["backlog"]["failed_count"],
+                )
+            except Exception:
+                logger.exception("Failed to discover pending CSV ingest jobs.")
+                if settings.startup_sync_require_success:
+                    raise
         startup_sync_result = None
         if settings.market_sync_queue_enabled:
-            with SessionLocal() as db:
-                try:
-                    imported_files = import_local_csv_seed_data(db)
-                    logger.info("Startup CSV import complete for queued market sync: imported_files=%s", imported_files)
-                except Exception:
-                    logger.exception("Startup CSV import failed.")
-                    if settings.startup_sync_require_success:
-                        raise
             try:
                 queue = build_market_sync_queue()
                 queue.enqueue_universe_refresh()

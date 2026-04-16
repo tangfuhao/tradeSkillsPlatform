@@ -3,19 +3,30 @@ from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = SERVICE_ROOT.parents[1] if SERVICE_ROOT.parent.name == "apps" else SERVICE_ROOT
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "runtime"
 DEFAULT_HISTORICAL_DATA_DIR = REPO_ROOT.parent / "data"
+DEFAULT_DATABASE_URL = "postgresql+psycopg://tradeskills:tradeskills@127.0.0.1:5432/tradeskills"
 
 
 class Settings(BaseSettings):
     app_name: str = "TradeSkills API"
     api_prefix: str = "/api/v1"
     data_dir: Path = DEFAULT_DATA_DIR
-    database_url: str = f"sqlite:///{(DEFAULT_DATA_DIR / 'trade_skills.db').as_posix()}"
+    database_url: str = DEFAULT_DATABASE_URL
+    database_pool_size: int = 20
+    database_max_overflow: int = 20
+    database_pool_timeout_seconds: float = 30.0
+    database_pool_recycle_seconds: float = 1800.0
+    database_connect_timeout_seconds: int = 10
+    database_statement_timeout_ms: int = 30000
+    database_bulk_statement_timeout_ms: int = 0
+    database_lock_timeout_ms: int = 5000
+    database_health_slow_query_ms: int = 1000
     agent_runner_base_url: str = "http://localhost:8100"
     tool_gateway_base_url: str = "http://localhost:8000"
     tool_gateway_shared_secret: str = ""
@@ -55,6 +66,11 @@ class Settings(BaseSettings):
     market_sync_redis_url: str = "redis://localhost:6379/0"
     market_sync_worker_poll_seconds: float = 1.0
     market_sync_worker_heartbeat_ttl_seconds: float = 30.0
+    live_task_execution_claim_ttl_seconds: float = 300.0
+    backtest_run_claim_ttl_seconds: float = 900.0
+    market_candle_partition_months_back: int = 24
+    market_candle_partition_months_ahead: int = 3
+    market_candle_hot_retention_months: int = 36
 
     model_config = SettingsConfigDict(
         env_prefix="TRADE_SKILLS_",
@@ -62,6 +78,18 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def safe_database_url(self) -> str:
+        return make_url(self.database_url).render_as_string(hide_password=True)
+
+    @property
+    def database_backend(self) -> str:
+        return make_url(self.database_url).get_backend_name()
+
+    @property
+    def database_driver(self) -> str:
+        return make_url(self.database_url).get_driver_name()
 
 
 @lru_cache(maxsize=1)

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+import socket
+from datetime import timedelta
 from typing import Any, Literal
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -16,7 +21,7 @@ from app.services.execution_lifecycle import LIVE_RUNTIME_OWNING_STATUSES, LIVE_
 from app.services.market_data_sync import get_fresh_market_symbols_for_dispatch, get_market_sync_gate_status
 from app.services.portfolio_engine import DEFAULT_LIVE_INITIAL_CAPITAL, LIVE_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import live_signal_to_dict, live_task_to_dict
-from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
+from app.services.utils import datetime_to_ms, ensure_utc, ms_to_datetime, new_id, utc_now
 from app.tool_gateway.demo_gateway import build_market_snapshot_for_live
 
 
@@ -107,10 +112,14 @@ class LiveTaskService:
         )
         return engine.get_portfolio_state()
 
-    def control_task(self, task_id: str, action: str) -> dict[str, Any]:
-        task = self.db.get(LiveTask, task_id)
+    def control_task(self, task_id: str, action: str, *, expected_revision: int | None = None) -> dict[str, Any]:
+        task = self.db.scalar(select(LiveTask).where(LiveTask.id == task_id).with_for_update())
         if task is None:
             raise LookupError("Live task not found.")
+        if expected_revision is not None and task.revision != expected_revision:
+            raise ValueError(
+                f"Live runtime revision conflict: expected {expected_revision}, current {task.revision}."
+            )
 
         normalized = action.strip().lower()
         if normalized == "pause":
@@ -130,7 +139,11 @@ class LiveTaskService:
 
         task.updated_at = utc_now()
         self.db.add(task)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except StaleDataError as exc:
+            self.db.rollback()
+            raise ValueError("Live runtime changed concurrently; refresh and retry.") from exc
         self.db.refresh(task)
         return live_task_to_dict(task)
 
@@ -182,16 +195,21 @@ def execute_live_task(
                 if raise_on_reject:
                     raise LiveTaskTriggerRejectedError("No executable live slot is pending.")
                 return None
-            if (
-                task.last_completed_slot_as_of_ms is not None
-                and effective_slot_as_of_ms <= task.last_completed_slot_as_of_ms
-            ):
-                if raise_on_reject:
-                    raise LiveTaskTriggerRejectedError("No executable live slot is pending.")
-                return None
 
+            claim_outcome = _claim_live_task_slot(
+                db,
+                task_id=task_id,
+                slot_as_of_ms=effective_slot_as_of_ms,
+                conflict_policy=conflict_policy,
+                raise_on_reject=raise_on_reject,
+            )
+            if claim_outcome.get("signal") is not None:
+                return live_signal_to_dict(claim_outcome["signal"])
+            claim_token = claim_outcome.get("claim_token")
+            if claim_token is None:
+                return None
+            task = claim_outcome["task"]
             trigger_time = utc_now()
-            task.last_triggered_at = trigger_time
             engine = PortfolioEngine(
                 db,
                 skill_id=skill.id,
@@ -271,7 +289,7 @@ def execute_live_task(
                 agent_response, recovery = execute_agent_run_with_recovery(
                     payload,
                     mode="live_signal",
-                    should_abort=lambda: _live_retry_should_abort(db, task_id),
+                    should_abort=lambda: _live_retry_should_abort(db, task_id, claim_token=claim_token),
                 )
                 decision = dict(agent_response["decision"])
                 state_patch = decision.get("state_patch") or {}
@@ -286,6 +304,9 @@ def execute_live_task(
                     id=new_id("sig"),
                     live_task_id=task.id,
                     trigger_time=trigger_time,
+                    execution_time_ms=effective_slot_as_of_ms,
+                    dispatch_as_of_ms=coverage_context.get("dispatch_as_of_ms"),
+                    trigger_origin=trigger_origin,
                     delivery_status="stored",
                     signal_json={
                         "decision": {
@@ -314,13 +335,20 @@ def execute_live_task(
                         "recovery": recovery,
                     },
                 )
-                task.last_completed_slot_as_of_ms = effective_slot_as_of_ms
-                db.add(signal)
-                db.add(task)
-                db.commit()
+                signal = _finalize_live_task_signal(
+                    db,
+                    task_id=task.id,
+                    claim_token=claim_token,
+                    signal=signal,
+                    slot_as_of_ms=effective_slot_as_of_ms,
+                    mark_completed=True,
+                )
+                if signal is None:
+                    return None
             except AgentRunAborted:
                 db.rollback()
-                return None if _live_retry_should_abort(db, task_id) else None
+                _release_live_task_claim(db, task_id=task_id, claim_token=claim_token)
+                return None if _live_retry_should_abort(db, task_id, claim_token=claim_token) else None
             except AgentRunRecoveryError as exc:
                 db.rollback()
                 task = db.get(LiveTask, task_id)
@@ -330,13 +358,21 @@ def execute_live_task(
                     task=task,
                     trigger_time=trigger_time,
                     slot_as_of_ms=effective_slot_as_of_ms,
+                    dispatch_as_of_ms=coverage_context.get("dispatch_as_of_ms"),
                     trigger_origin=trigger_origin,
                     error_message=str(exc),
                     recovery=exc.recovery_payload(),
                 )
-                db.add(signal)
-                db.add(task)
-                db.commit()
+                signal = _finalize_live_task_signal(
+                    db,
+                    task_id=task.id,
+                    claim_token=claim_token,
+                    signal=signal,
+                    slot_as_of_ms=effective_slot_as_of_ms,
+                    mark_completed=False,
+                )
+                if signal is None:
+                    return None
             except Exception as exc:
                 db.rollback()
                 task = db.get(LiveTask, task_id)
@@ -346,6 +382,7 @@ def execute_live_task(
                     task=task,
                     trigger_time=trigger_time,
                     slot_as_of_ms=effective_slot_as_of_ms,
+                    dispatch_as_of_ms=coverage_context.get("dispatch_as_of_ms"),
                     trigger_origin=trigger_origin,
                     error_message=str(exc),
                     recovery={
@@ -365,9 +402,16 @@ def execute_live_task(
                         },
                     },
                 )
-                db.add(signal)
-                db.add(task)
-                db.commit()
+                signal = _finalize_live_task_signal(
+                    db,
+                    task_id=task.id,
+                    claim_token=claim_token,
+                    signal=signal,
+                    slot_as_of_ms=effective_slot_as_of_ms,
+                    mark_completed=False,
+                )
+                if signal is None:
+                    return None
 
             db.refresh(signal)
             return live_signal_to_dict(signal)
@@ -493,6 +537,7 @@ def _build_failed_live_signal(
     task: LiveTask,
     trigger_time,
     slot_as_of_ms: int,
+    dispatch_as_of_ms: int | None,
     trigger_origin: str,
     error_message: str,
     recovery: dict[str, Any],
@@ -501,6 +546,9 @@ def _build_failed_live_signal(
         id=new_id("sig"),
         live_task_id=task.id,
         trigger_time=trigger_time,
+        execution_time_ms=slot_as_of_ms,
+        dispatch_as_of_ms=dispatch_as_of_ms,
+        trigger_origin=trigger_origin,
         delivery_status="failed",
         signal_json={
             "error_message": error_message,
@@ -537,6 +585,10 @@ def _build_tool_gateway_context(
         "as_of_ms": as_of_ms,
         "trace_index": trace_index,
     }
+
+
+def _execution_owner() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 
@@ -577,10 +629,14 @@ def _extract_live_watchlist(skill: Skill) -> set[str]:
     return watchlist
 
 
-def _live_retry_should_abort(db: Session, task_id: str) -> bool:
+def _live_retry_should_abort(db: Session, task_id: str, *, claim_token: str | None = None) -> bool:
     db.expire_all()
     task = db.get(LiveTask, task_id)
-    return task is None or task.status != LIVE_STATUS_ACTIVE
+    if task is None or task.status != LIVE_STATUS_ACTIVE:
+        return True
+    if claim_token is not None and task.execution_claim_token != claim_token:
+        return True
+    return False
 
 
 
@@ -588,3 +644,121 @@ def _sync_snapshot_is_stale(last_successful_sync_completed_at_ms: int) -> bool:
     freshness_ms = int(settings.live_data_freshness_seconds * 1000)
     now_ms = datetime_to_ms(utc_now())
     return now_ms - last_successful_sync_completed_at_ms > freshness_ms
+
+
+def _claim_live_task_slot(
+    db: Session,
+    *,
+    task_id: str,
+    slot_as_of_ms: int,
+    conflict_policy: Literal["skip", "raise"],
+    raise_on_reject: bool,
+) -> dict[str, Any]:
+    task = db.scalar(select(LiveTask).where(LiveTask.id == task_id).with_for_update())
+    if task is None:
+        if raise_on_reject:
+            raise LookupError("Live task not found.")
+        return {}
+    existing_signal = db.scalar(
+        select(LiveSignal)
+        .where(
+            LiveSignal.live_task_id == task_id,
+            LiveSignal.execution_time_ms == slot_as_of_ms,
+        )
+        .order_by(LiveSignal.created_at.desc())
+    )
+    if existing_signal is not None:
+        return {"task": task, "signal": existing_signal, "claim_token": None}
+    if task.status != LIVE_STATUS_ACTIVE:
+        if raise_on_reject:
+            raise LiveTaskTriggerRejectedError("Live task is not active.")
+        return {}
+    if task.last_completed_slot_as_of_ms is not None and slot_as_of_ms <= task.last_completed_slot_as_of_ms:
+        if raise_on_reject:
+            raise LiveTaskTriggerRejectedError("No executable live slot is pending.")
+        return {}
+
+    now = utc_now()
+    if (
+        task.execution_claim_token
+        and task.last_claimed_slot_as_of_ms == slot_as_of_ms
+        and task.execution_claim_expires_at is not None
+        and ensure_utc(task.execution_claim_expires_at) > now
+    ):
+        if conflict_policy == "raise":
+            raise LiveTaskConflictError("Live task slot is already claimed.")
+        return {}
+
+    claim_token = new_id("lclaim")
+    task.last_triggered_at = now
+    task.last_claimed_slot_as_of_ms = slot_as_of_ms
+    task.execution_claim_owner = _execution_owner()
+    task.execution_claim_token = claim_token
+    task.execution_claimed_at = now
+    task.execution_claim_expires_at = now + timedelta(seconds=settings.live_task_execution_claim_ttl_seconds)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return {"task": task, "signal": None, "claim_token": claim_token}
+
+
+def _release_live_task_claim(db: Session, *, task_id: str, claim_token: str) -> None:
+    task = db.scalar(select(LiveTask).where(LiveTask.id == task_id).with_for_update())
+    if task is None or task.execution_claim_token != claim_token:
+        db.rollback()
+        return
+    task.execution_claim_token = None
+    task.execution_claim_owner = None
+    task.execution_claimed_at = None
+    task.execution_claim_expires_at = None
+    db.add(task)
+    db.commit()
+
+
+def _finalize_live_task_signal(
+    db: Session,
+    *,
+    task_id: str,
+    claim_token: str,
+    signal: LiveSignal,
+    slot_as_of_ms: int,
+    mark_completed: bool,
+) -> LiveSignal | None:
+    task = db.scalar(select(LiveTask).where(LiveTask.id == task_id).with_for_update())
+    if task is None:
+        db.rollback()
+        return None
+    if task.execution_claim_token != claim_token:
+        db.rollback()
+        existing_signal = db.scalar(
+            select(LiveSignal)
+            .where(
+                LiveSignal.live_task_id == task_id,
+                LiveSignal.execution_time_ms == slot_as_of_ms,
+            )
+            .order_by(LiveSignal.created_at.desc())
+        )
+        return existing_signal
+
+    if mark_completed:
+        task.last_completed_slot_as_of_ms = slot_as_of_ms
+    task.execution_claim_token = None
+    task.execution_claim_owner = None
+    task.execution_claimed_at = None
+    task.execution_claim_expires_at = None
+    db.add(signal)
+    db.add(task)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing_signal = db.scalar(
+            select(LiveSignal)
+            .where(
+                LiveSignal.live_task_id == task_id,
+                LiveSignal.execution_time_ms == slot_as_of_ms,
+            )
+            .order_by(LiveSignal.created_at.desc())
+        )
+        return existing_signal
+    return signal

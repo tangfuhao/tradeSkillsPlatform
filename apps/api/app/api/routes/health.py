@@ -1,8 +1,11 @@
 from fastapi import APIRouter
 
 from app.core.config import settings
+from app.core.database import SessionLocal
+from app.core.schema import inspect_runtime_storage
 from app.runtime.market_sync_loop import market_sync_loop_manager
 from app.schemas import HealthResponse
+from app.services.market_data_sync import get_csv_ingestion_backlog
 from app.services.utils import datetime_to_ms, utc_now
 
 
@@ -12,11 +15,17 @@ router = APIRouter(tags=["health"])
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     snapshot = market_sync_loop_manager.get_snapshot()
+    database_status = inspect_runtime_storage()
+    with SessionLocal() as db:
+        ingest_backlog = get_csv_ingestion_backlog(db)
+    overall_status = "ok" if database_status["status"] == "ok" else "degraded"
     return HealthResponse(
         name=settings.app_name,
-        status="ok",
-        database_url=settings.database_url,
+        status=overall_status,
+        database_url=settings.safe_database_url,
+        database=database_status,
         agent_runner_base_url=settings.agent_runner_base_url,
+        ingest_backlog=ingest_backlog,
         market_sync={
             "universe_active_count": snapshot.universe_active_count,
             "fresh_symbol_count": snapshot.fresh_symbol_count,
