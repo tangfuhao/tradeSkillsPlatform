@@ -84,6 +84,9 @@
 .hero-metrics,
 .pulse-grid,
 .insight-grid,
+.sync-status-grid,
+.sync-status-metrics,
+.sync-health-strip,
 .trace-summary-strip,
 .meta-strip,
 .trace-meta-grid,
@@ -99,7 +102,19 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.sync-status-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sync-status-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .meta-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.sync-health-strip {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -155,6 +170,28 @@
 .console-overview-grid,
 .console-workspace-grid {
   align-items: start;
+}
+
+.sync-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--surface-strong);
+  box-shadow: 0 0 0 0.5px var(--line);
+}
+
+.sync-status-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.sync-status-head h3 {
+  margin: 2px 0 0;
+  font-size: 1.05rem;
 }
 
 .console-workspace-grid {
@@ -477,6 +514,9 @@
   .hero-metrics,
   .pulse-grid,
   .insight-grid,
+  .sync-status-grid,
+  .sync-status-metrics,
+  .sync-health-strip,
   .trace-summary-strip,
   .meta-strip,
   .trace-meta-grid,
@@ -495,6 +535,9 @@
   .hero-metrics,
   .pulse-grid,
   .insight-grid,
+  .sync-status-grid,
+  .sync-status-metrics,
+  .sync-health-strip,
   .meta-strip,
   .trace-summary-strip,
   .trace-meta-grid,
@@ -508,6 +551,7 @@
   .pulse-card-head,
   .list-card-top,
   .info-head,
+  .sync-status-head,
   .trace-head,
   .trace-tool-head,
   .trace-round-head,

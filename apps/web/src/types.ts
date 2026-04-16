@@ -44,6 +44,32 @@ export type ServicePulse = {
   details?: string;
 };
 
+export type MarketSyncSummary = {
+  universe_active_count: number;
+  fresh_symbol_count: number;
+  coverage_ratio: number;
+  dispatch_as_of_ms: number | null;
+  degraded: boolean;
+  snapshot_age_ms: number | null;
+  blocked_reason: string | null;
+  missing_symbol_count: number;
+  universe_version: number | null;
+};
+
+export type ApiHealthResponse = {
+  name: string;
+  status: string;
+  database_url: string;
+  agent_runner_base_url: string;
+  market_sync: MarketSyncSummary;
+  market_sync_loop_running: boolean;
+  last_sync_started_at_ms: number | null;
+  last_sync_completed_at_ms: number | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  server_time_ms: number;
+};
+
 export type SkillEnvelope = {
   schema_version?: string;
   trigger?: SkillTrigger;
@@ -279,6 +305,12 @@ export type MarketOverview = {
   coverage_ranges: MarketCoverageRange[];
   recent_csv_jobs: CsvIngestionJob[];
   sync_cursors: MarketSyncCursor[];
+  tier1_freshness_ms_p95?: number | null;
+  tier2_freshness_ms_p95?: number | null;
+  bootstrap_pending_count?: number;
+  backfill_lag_symbol_count?: number;
+  market_sync?: Record<string, unknown>;
+  latest_coverage_snapshot?: Record<string, unknown>;
 };
 
 export type MarketCandle = {

@@ -22,6 +22,7 @@ import {
   triggerLiveTask,
 } from '../api';
 import type {
+  ApiHealthResponse,
   BacktestRun,
   BacktestTrace,
   LiveSignal,
@@ -68,6 +69,10 @@ const generalStatusLabels: Record<string, string> = {
   queued: '排队中',
   running: '运行中',
   completed: '已完成',
+  succeeded: '同步成功',
+  no_advance: '无新增进度',
+  blocked: '已阻塞',
+  disabled: '已关闭',
   failed: '失败',
   active: '已激活',
   stored: '已存储',
@@ -77,6 +82,12 @@ const generalStatusLabels: Record<string, string> = {
   degraded: '降级',
   skipped: '已跳过',
   not_available: '暂不可用',
+};
+
+const syncBlockReasonLabels: Record<string, string> = {
+  no_active_universe: '交易所活跃合约列表为空',
+  tier1_incomplete: '核心 Tier1 标的覆盖不完整',
+  coverage_below_threshold: '整体覆盖率低于派发阈值',
 };
 
 const actionLabels: Record<string, string> = {
@@ -135,8 +146,17 @@ function formatPercent(value?: number | null): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+function formatDuration(value?: number | null): string {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) return '--';
+  return formatShortDuration(value);
+}
+
 function describeStatus(status?: string | null): string {
   return translateToken(status, generalStatusLabels);
+}
+
+function describeSyncBlockReason(reason?: string | null): string {
+  return translateToken(reason, syncBlockReasonLabels);
 }
 
 function describeAction(action?: string | null): string {
@@ -192,13 +212,13 @@ function getErrorMessage(error: unknown): string {
 
 function toneForStatus(status?: string | null): 'ok' | 'warn' | 'error' | 'neutral' {
   if (!status) return 'neutral';
-  if (['ok', 'healthy', 'completed', 'active', 'stored', 'passed'].includes(status)) {
+  if (['ok', 'healthy', 'completed', 'active', 'stored', 'passed', 'succeeded'].includes(status)) {
     return 'ok';
   }
-  if (['queued', 'running', 'pending', 'skipped'].includes(status)) {
+  if (['queued', 'running', 'pending', 'skipped', 'no_advance'].includes(status)) {
     return 'warn';
   }
-  if (['failed', 'validation_failed', 'degraded'].includes(status)) {
+  if (['failed', 'validation_failed', 'degraded', 'blocked'].includes(status)) {
     return 'error';
   }
   return 'neutral';
@@ -281,6 +301,7 @@ export default function ConsolePage() {
   const [liveTasks, setLiveTasks] = useState<LiveTask[]>([]);
   const [signals, setSignals] = useState<LiveSignal[]>([]);
   const [servicePulse, setServicePulse] = useState<ServicePulse[]>([]);
+  const [apiHealth, setApiHealth] = useState<ApiHealthResponse | null>(null);
   const [marketOverview, setMarketOverview] = useState<MarketOverview | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState('');
@@ -310,6 +331,7 @@ export default function ConsolePage() {
 
   const latestCsvJob = marketOverview?.recent_csv_jobs?.[0] ?? null;
   const skippedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'skipped').length ?? 0;
+  const failedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'failed').length ?? 0;
   const traceAutoRefresh = isBacktestActive(selectedBacktest?.status);
   const hasHistoricalCoverage = marketOverview?.coverage_start_ms != null && marketOverview?.coverage_end_ms != null;
 
@@ -347,6 +369,65 @@ export default function ConsolePage() {
     ];
   }, [backtests, liveTasks, signals, skills]);
 
+  const liveOpsSummary = useMemo(() => {
+    const activeTaskCount = liveTasks.filter((task) => task.status === 'active').length;
+    const latestCompletedSlotMs = liveTasks.reduce<number | null>(
+      (latest, task) => {
+        if (typeof task.last_completed_slot_as_of_ms !== 'number') return latest;
+        return latest == null ? task.last_completed_slot_as_of_ms : Math.max(latest, task.last_completed_slot_as_of_ms);
+      },
+      null,
+    );
+    const latestTriggeredAtMs = liveTasks.reduce<number | null>(
+      (latest, task) => {
+        if (typeof task.last_triggered_at_ms !== 'number') return latest;
+        return latest == null ? task.last_triggered_at_ms : Math.max(latest, task.last_triggered_at_ms);
+      },
+      null,
+    );
+    const latestSignalAtMs = signals.reduce<number | null>(
+      (latest, signal) => (latest == null ? signal.trigger_time_ms : Math.max(latest, signal.trigger_time_ms)),
+      null,
+    );
+    const idleTaskCount = liveTasks.filter((task) => task.status === 'active' && task.last_completed_slot_as_of_ms == null).length;
+
+    return {
+      activeTaskCount,
+      todaySignals: countSignalsToday(signals),
+      latestCompletedSlotMs,
+      latestTriggeredAtMs,
+      latestSignalAtMs,
+      idleTaskCount,
+    };
+  }, [liveTasks, signals]);
+
+  const exchangeSyncSummary = useMemo(() => {
+    const sync = apiHealth?.market_sync;
+    return {
+      loopRunning: apiHealth?.market_sync_loop_running ?? false,
+      lastStatus: apiHealth?.last_sync_status ?? null,
+      lastStartedAtMs: apiHealth?.last_sync_started_at_ms ?? null,
+      lastCompletedAtMs: apiHealth?.last_sync_completed_at_ms ?? null,
+      lastError: apiHealth?.last_sync_error ?? null,
+      coverageRatio: sync?.coverage_ratio ?? null,
+      dispatchAsOfMs: sync?.dispatch_as_of_ms ?? null,
+      snapshotAgeMs: sync?.snapshot_age_ms ?? null,
+      universeActiveCount: sync?.universe_active_count ?? 0,
+      freshSymbolCount: sync?.fresh_symbol_count ?? 0,
+      missingSymbolCount: sync?.missing_symbol_count ?? 0,
+      degraded: sync?.degraded ?? false,
+      blockedReason: sync?.blocked_reason ?? null,
+      bootstrapPendingCount: marketOverview?.bootstrap_pending_count ?? 0,
+      backfillLagCount: marketOverview?.backfill_lag_symbol_count ?? 0,
+    };
+  }, [apiHealth, marketOverview]);
+
+  const showSyncError = useMemo(() => {
+    if (!exchangeSyncSummary.lastError) return false;
+    if (exchangeSyncSummary.lastStatus === 'disabled') return false;
+    return exchangeSyncSummary.lastStatus === 'failed' || Boolean(exchangeSyncSummary.blockedReason);
+  }, [exchangeSyncSummary.blockedReason, exchangeSyncSummary.lastError, exchangeSyncSummary.lastStatus]);
+
   async function refreshDashboard() {
     const [apiHealth, runnerHealth, overview, nextSkills, nextBacktests, nextLiveTasks, nextSignals] = await Promise.all([
       getApiHealth(),
@@ -362,6 +443,7 @@ export default function ConsolePage() {
       { name: '后端 API', status: apiHealth.status, details: getApiBaseUrl() },
       { name: 'Agent Runner', status: runnerHealth.status, details: getAgentRunnerBaseUrl() },
     ]);
+    setApiHealth(apiHealth);
     setMarketOverview(overview);
     setSkills(nextSkills);
     setBacktests(nextBacktests);
@@ -649,6 +731,127 @@ export default function ConsolePage() {
             </div>
           </div>
         </article>
+      </section>
+
+      <section className="surface">
+        <PanelHeader title="同步态势" subtitle="用最少的信息看清实时任务是否在跑、交易所同步是否推进，以及服务器有没有卡住。" />
+        <div className="sync-status-grid">
+          <article className="sync-status-card">
+            <div className="sync-status-head">
+              <div>
+                <p className="section-eyebrow">Realtime</p>
+                <h3>实时执行</h3>
+              </div>
+              <span className={`status-pill is-${liveOpsSummary.activeTaskCount ? 'ok' : 'warn'}`}>
+                {liveOpsSummary.activeTaskCount ? '已接入' : '待激活'}
+              </span>
+            </div>
+            <div className="sync-status-metrics">
+              <MetricCard
+                label="活跃任务"
+                value={formatCount(liveOpsSummary.activeTaskCount)}
+                detail={liveOpsSummary.idleTaskCount ? `${formatCount(liveOpsSummary.idleTaskCount)} 个尚未完成首个 slot` : '任务等待新行情 slot 驱动'}
+                tone="accent"
+              />
+              <MetricCard
+                label="最近完成 slot"
+                value={formatTime(liveOpsSummary.latestCompletedSlotMs)}
+                detail="这是服务器最近一次把实时任务推进到的新时间点"
+                tone="neutral"
+              />
+              <MetricCard
+                label="今日信号"
+                value={formatCount(liveOpsSummary.todaySignals)}
+                detail={`最近信号 ${formatTime(liveOpsSummary.latestSignalAtMs)}`}
+                tone="warm"
+              />
+              <MetricCard
+                label="最近触发"
+                value={formatTime(liveOpsSummary.latestTriggeredAtMs)}
+                detail="如果长时间没有变化，通常表示没有新 slot 或任务未激活"
+                tone="neutral"
+              />
+            </div>
+          </article>
+
+          <article className="sync-status-card">
+            <div className="sync-status-head">
+              <div>
+                <p className="section-eyebrow">Exchange Sync</p>
+                <h3>交易所同步</h3>
+              </div>
+              <span
+                className={`status-pill is-${
+                  exchangeSyncSummary.blockedReason
+                    ? 'error'
+                    : exchangeSyncSummary.degraded
+                      ? 'warn'
+                      : toneForStatus(exchangeSyncSummary.lastStatus)
+                }`}
+              >
+                {exchangeSyncSummary.blockedReason
+                  ? '已阻塞'
+                  : exchangeSyncSummary.degraded
+                    ? '降级中'
+                    : describeStatus(exchangeSyncSummary.lastStatus)}
+              </span>
+            </div>
+            <div className="sync-status-metrics">
+              <MetricCard
+                label="同步循环"
+                value={exchangeSyncSummary.loopRunning ? '运行中' : '未运行'}
+                detail={
+                  exchangeSyncSummary.lastStatus === 'disabled'
+                    ? '当前配置未开启 OKX 增量同步'
+                    : `最近开始 ${formatTime(exchangeSyncSummary.lastStartedAtMs)}`
+                }
+                tone={exchangeSyncSummary.loopRunning ? 'accent' : 'neutral'}
+              />
+              <MetricCard
+                label="最近完成"
+                value={formatTime(exchangeSyncSummary.lastCompletedAtMs)}
+                detail={
+                  exchangeSyncSummary.lastStatus === 'disabled'
+                    ? '状态 已关闭'
+                    : `状态 ${describeStatus(exchangeSyncSummary.lastStatus)}`
+                }
+                tone="neutral"
+              />
+              <MetricCard
+                label="可派发覆盖"
+                value={formatTime(exchangeSyncSummary.dispatchAsOfMs)}
+                detail={`覆盖率 ${formatPercent(exchangeSyncSummary.coverageRatio)}`}
+                tone="warm"
+              />
+              <MetricCard
+                label="新鲜标的"
+                value={`${formatCount(exchangeSyncSummary.freshSymbolCount)} / ${formatCount(exchangeSyncSummary.universeActiveCount)}`}
+                detail={`缺失 ${formatCount(exchangeSyncSummary.missingSymbolCount)} / 待补齐 ${formatCount(exchangeSyncSummary.bootstrapPendingCount + exchangeSyncSummary.backfillLagCount)}`}
+                tone="neutral"
+              />
+            </div>
+            <div className="sync-health-strip">
+              <div className="info-box compact-box">
+                <p>快照年龄</p>
+                <strong>{formatDuration(exchangeSyncSummary.snapshotAgeMs)}</strong>
+              </div>
+              <div className="info-box compact-box">
+                <p>失败游标</p>
+                <strong>{formatCount(failedSyncCount)}</strong>
+              </div>
+              <div className="info-box compact-box">
+                <p>阻塞原因</p>
+                <strong>{describeSyncBlockReason(exchangeSyncSummary.blockedReason)}</strong>
+              </div>
+            </div>
+            {showSyncError ? (
+              <div className="info-box warning-box">
+                <p>最近同步报错</p>
+                <small>{exchangeSyncSummary.lastError}</small>
+              </div>
+            ) : null}
+          </article>
+        </div>
       </section>
 
       <section className="dual-grid console-workspace-grid">

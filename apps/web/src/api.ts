@@ -1,4 +1,5 @@
 import type {
+  ApiHealthResponse,
   BacktestRun,
   BacktestTrace,
   LiveSignal,
@@ -78,7 +79,7 @@ export function getAgentRunnerBaseUrl(): string {
   return agentRunnerBaseUrl;
 }
 
-export async function getApiHealth(): Promise<any> {
+export async function getApiHealth(): Promise<ApiHealthResponse> {
   return readJson(`${apiBaseUrl}/api/v1/health`);
 }
 
