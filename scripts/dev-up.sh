@@ -185,7 +185,7 @@ END
 $$;
 SQL
 
-  if ! psql -h 127.0.0.1 -p "$POSTGRES_PORT" -lqt | cut -d '|' -f 1 | grep -qx ' tradeskills'; then
+  if [[ "$(psql -h 127.0.0.1 -p "$POSTGRES_PORT" -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname = 'tradeskills'")" != "1" ]]; then
     createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -O tradeskills tradeskills
   fi
 }
