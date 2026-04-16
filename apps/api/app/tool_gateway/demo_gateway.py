@@ -27,7 +27,10 @@ def build_market_snapshot_for_backtest(db: Session, as_of: datetime, step_index:
     return _build_strict_snapshot(db, as_of)
 
 
-def build_market_snapshot_for_live(db: Session) -> dict[str, Any]:
+def build_market_snapshot_for_live(db: Session, as_of: datetime | None = None) -> dict[str, Any]:
+    if as_of is not None:
+        return _build_strict_snapshot(db, as_of)
+
     latest_open_time_ms = db.scalar(select(func.max(MarketCandle.open_time_ms)).select_from(MarketCandle))
     if latest_open_time_ms is None:
         return {
@@ -36,8 +39,8 @@ def build_market_snapshot_for_live(db: Session) -> dict[str, Any]:
             "as_of_ms": None,
             "error": "No historical market data is available. Import CSV data first.",
         }
-    as_of = datetime.fromtimestamp(latest_open_time_ms / 1000, tz=timezone.utc)
-    return _build_strict_snapshot(db, as_of)
+    resolved_as_of = datetime.fromtimestamp(latest_open_time_ms / 1000, tz=timezone.utc)
+    return _build_strict_snapshot(db, resolved_as_of)
 
 
 def get_strategy_state(db: Session, *, skill_id: str, scope_kind: str, scope_id: str) -> dict[str, Any]:

@@ -141,7 +141,7 @@ export default function SignalsPage() {
         toast.success('实时任务已删除');
       } else if (action === 'trigger') {
         await triggerLiveTask(task.id);
-        toast.success('触发成功');
+        toast.success('触发成功，已走同一套 sync 门禁');
       } else {
         await controlLiveTask(task.id, action);
         toast.success(`实时任务已${action === 'pause' ? '暂停' : action === 'resume' ? '继续' : '停止'}`);
@@ -324,7 +324,7 @@ export default function SignalsPage() {
                       ) : (
                         <div className="empty-state compact-empty">
                           <strong>{loading ? '正在读取信号流...' : '暂无信号样本'}</strong>
-                          <p>使用「立即触发」验证当前策略的信号输出。</p>
+                          <p>使用「立即触发」验证当前策略在最新同步 slot 上的信号输出。</p>
                         </div>
                       )}
                     </article>

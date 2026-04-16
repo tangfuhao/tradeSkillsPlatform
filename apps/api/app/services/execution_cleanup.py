@@ -16,7 +16,7 @@ from app.models import (
     StrategyState,
     TraceExecutionDetail,
 )
-from app.runtime.scheduler import scheduler_manager
+from app.runtime.live_execution_locks import clear_live_task_execution_lock
 from app.services.execution_lifecycle import BACKTEST_BUSY_STATUSES
 
 
@@ -54,10 +54,10 @@ def delete_backtest_run(db: Session, run: BacktestRun) -> None:
 
 
 def delete_live_task(db: Session, task: LiveTask) -> None:
-    scheduler_manager.unschedule_live_task(task.id)
     db.execute(delete(LiveSignal).where(LiveSignal.live_task_id == task.id))
     delete_execution_scope_state(db, scope_kind="live_task", scope_id=task.id)
     db.delete(task)
+    clear_live_task_execution_lock(task.id)
 
 
 def delete_strategy_cascade(db: Session, skill: Skill) -> None:

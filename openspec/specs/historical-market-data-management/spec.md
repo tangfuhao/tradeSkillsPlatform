@@ -14,6 +14,10 @@ The platform SHALL support operator-managed local historical OKX-style candle in
 - **WHEN** the local coverage gap exceeds the configured incremental sync threshold
 - **THEN** the platform marks the sync cursor as skipped and leaves the larger backfill to offline CSV seeding
 
+#### Scenario: Healthy live sync sweep becomes a dispatch hook
+- **WHEN** a recurring live sync sweep completes successfully and advances local `coverage_end_ms`
+- **THEN** the platform surfaces that sweep result as the only automatic live-dispatch hook for cadence-aligned runtimes
+
 ### Requirement: Historical reads are constrained by replay time
 The platform SHALL expose historical market data to backtest tools through time-bounded queries that prevent future-data leakage.
 
@@ -35,3 +39,6 @@ The platform SHALL surface missing coverage, skipped syncs, or unavailable symbo
 - **WHEN** the requested date range is not fully covered by the available historical data
 - **THEN** the platform rejects the run with a coverage error instead of silently falling back to partial history
 
+#### Scenario: Live runtime sees stale or unhealthy sync state
+- **WHEN** the latest sync loop state is stale, failed, or did not produce a usable coverage window
+- **THEN** the platform blocks live dispatch and manual trigger requests instead of reusing older market snapshots

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 import time
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import CsvIngestionJob, MarketCandle, MarketSyncCursor
-from app.services.market_data_store import is_usdt_swap_symbol, parse_base_symbol
+from app.services.market_data_store import is_usdt_swap_symbol, parse_base_symbol, timeframe_to_ms
 from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
 
 
@@ -31,6 +32,33 @@ _SECONDARY_INDEXES = [
     ("ix_market_candles_base_symbol", "market_candles", "(base_symbol)"),
     ("ix_market_candles_open_time_ms", "market_candles", "(open_time_ms)"),
 ]
+
+
+@dataclass(slots=True)
+class MarketSyncSweepResult:
+    success: bool
+    status: str
+    started_at_ms: int
+    completed_at_ms: int
+    coverage_start_ms_before: int | None = None
+    coverage_end_ms_before: int | None = None
+    coverage_start_ms_after: int | None = None
+    coverage_end_ms_after: int | None = None
+    advanced_coverage: bool = False
+    inserted_rows: int = 0
+    synced_symbols: int = 0
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    error_message: str | None = None
+    cutoff_ms: int | None = None
+
+    def is_healthy(self) -> bool:
+        return self.status in {"succeeded", "no_advance"}
+
+    def is_dispatchable(self) -> bool:
+        return self.success and self.advanced_coverage and self.coverage_end_ms_after is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _drop_secondary_indexes(db: Session) -> None:
@@ -50,14 +78,16 @@ def _rebuild_secondary_indexes(db: Session) -> None:
 def run_startup_market_data_sync(db: Session) -> dict[str, Any]:
     started_at = utc_now()
     imported_files = import_local_csv_seed_data(db)
-    synced_symbols = sync_incremental_okx_history(db)
+    target_cutoff = compute_startup_sync_cutoff()
+    sync_sweep_result = sync_incremental_okx_history(db, cutoff=target_cutoff)
     finished_at = utc_now()
     return {
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "imported_files": imported_files,
-        "synced_symbols": synced_symbols,
-        "target_cutoff": compute_sync_cutoff().isoformat(),
+        "sync_sweep": sync_sweep_result.to_dict(),
+        "sync_sweep_result": sync_sweep_result,
+        "target_cutoff": target_cutoff.isoformat(),
     }
 
 
@@ -175,7 +205,10 @@ def ingest_csv_file(db: Session, path: Path, fingerprint: str) -> None:
     db.commit()
     logger.info(
         "CSV import completed: %s (rows_seen=%s rows_inserted=%s rows_filtered=%s)",
-        path.name, rows_seen, rows_inserted, rows_filtered,
+        path.name,
+        rows_seen,
+        rows_inserted,
+        rows_filtered,
     )
 
 
@@ -236,21 +269,83 @@ def normalize_csv_row(row: dict[str, str], now: datetime | None = None) -> dict[
     }
 
 
-def compute_sync_cutoff(now: datetime | None = None) -> datetime:
+def compute_startup_sync_cutoff(now: datetime | None = None) -> datetime:
     current = now or utc_now()
     target_date = (current - timedelta(days=settings.startup_sync_target_offset_days)).date()
     return datetime(target_date.year, target_date.month, target_date.day, 23, 59, tzinfo=timezone.utc)
 
 
-def sync_incremental_okx_history(db: Session) -> int:
-    if not settings.okx_incremental_sync_enabled:
-        logger.info("OKX incremental sync is disabled by configuration; skipping startup API catch-up.")
-        return 0
+def compute_live_sync_cutoff(now: datetime | None = None) -> datetime:
+    current = now or utc_now()
+    timeframe_ms = timeframe_to_ms(settings.historical_base_timeframe)
+    current_ms = datetime_to_ms(current)
+    latest_closed_open_time_ms = ((current_ms // timeframe_ms) * timeframe_ms) - timeframe_ms
+    if latest_closed_open_time_ms < 0:
+        latest_closed_open_time_ms = 0
+    return ms_to_datetime(latest_closed_open_time_ms)
 
-    active_symbols = fetch_okx_active_usdt_swap_symbols()
+
+def get_market_data_coverage_ms(db: Session) -> tuple[int | None, int | None]:
+    start_ms, end_ms = db.execute(
+        select(func.min(MarketCandle.open_time_ms), func.max(MarketCandle.open_time_ms)).where(
+            MarketCandle.timeframe == settings.historical_base_timeframe
+        )
+    ).one()
+    return start_ms, end_ms
+
+
+def sync_incremental_okx_history(db: Session, *, cutoff: datetime | None = None) -> MarketSyncSweepResult:
+    started_at = utc_now()
+    coverage_start_ms_before, coverage_end_ms_before = get_market_data_coverage_ms(db)
+    effective_cutoff = cutoff or compute_startup_sync_cutoff(started_at)
+    cutoff_ms = datetime_to_ms(effective_cutoff)
+
+    if not settings.okx_incremental_sync_enabled:
+        completed_at = utc_now()
+        return MarketSyncSweepResult(
+            success=False,
+            status="disabled",
+            started_at_ms=datetime_to_ms(started_at),
+            completed_at_ms=datetime_to_ms(completed_at),
+            coverage_start_ms_before=coverage_start_ms_before,
+            coverage_end_ms_before=coverage_end_ms_before,
+            coverage_start_ms_after=coverage_start_ms_before,
+            coverage_end_ms_after=coverage_end_ms_before,
+            error_message="OKX incremental sync is disabled by configuration.",
+            cutoff_ms=cutoff_ms,
+        )
+
+    try:
+        active_symbols = fetch_okx_active_usdt_swap_symbols()
+    except Exception as exc:
+        completed_at = utc_now()
+        return MarketSyncSweepResult(
+            success=False,
+            status="failed",
+            started_at_ms=datetime_to_ms(started_at),
+            completed_at_ms=datetime_to_ms(completed_at),
+            coverage_start_ms_before=coverage_start_ms_before,
+            coverage_end_ms_before=coverage_end_ms_before,
+            coverage_start_ms_after=coverage_start_ms_before,
+            coverage_end_ms_after=coverage_end_ms_before,
+            error_message=str(exc),
+            cutoff_ms=cutoff_ms,
+        )
+
     if not active_symbols:
-        logger.warning("No active OKX USDT swap instruments were returned; skipping API sync.")
-        return 0
+        completed_at = utc_now()
+        return MarketSyncSweepResult(
+            success=False,
+            status="failed",
+            started_at_ms=datetime_to_ms(started_at),
+            completed_at_ms=datetime_to_ms(completed_at),
+            coverage_start_ms_before=coverage_start_ms_before,
+            coverage_end_ms_before=coverage_end_ms_before,
+            coverage_start_ms_after=coverage_start_ms_before,
+            coverage_end_ms_after=coverage_end_ms_before,
+            error_message="No active OKX USDT swap instruments were returned.",
+            cutoff_ms=cutoff_ms,
+        )
 
     known_symbols = set(
         db.scalars(
@@ -260,8 +355,25 @@ def sync_incremental_okx_history(db: Session) -> int:
         ).all()
     )
     sync_symbols = sorted(symbol for symbol in known_symbols if symbol in active_symbols)
-    cutoff_ms = datetime_to_ms(compute_sync_cutoff())
-    synced_count = 0
+    if not sync_symbols:
+        completed_at = utc_now()
+        return MarketSyncSweepResult(
+            success=False,
+            status="failed",
+            started_at_ms=datetime_to_ms(started_at),
+            completed_at_ms=datetime_to_ms(completed_at),
+            coverage_start_ms_before=coverage_start_ms_before,
+            coverage_end_ms_before=coverage_end_ms_before,
+            coverage_start_ms_after=coverage_start_ms_before,
+            coverage_end_ms_after=coverage_end_ms_before,
+            error_message="No eligible local symbols are available for incremental OKX sync.",
+            cutoff_ms=cutoff_ms,
+        )
+
+    inserted_rows = 0
+    synced_symbols = 0
+    failures: list[dict[str, Any]] = []
+
     for base_symbol in sync_symbols:
         latest_local_ms = db.scalar(
             select(func.max(MarketCandle.open_time_ms)).where(
@@ -271,34 +383,126 @@ def sync_incremental_okx_history(db: Session) -> int:
             )
         )
         if latest_local_ms is None:
+            failures.append({
+                "base_symbol": base_symbol,
+                "reason": "missing_local_history",
+                "message": "No local history exists for symbol.",
+            })
             continue
+
+        symbol_started_at = utc_now()
+        upsert_sync_cursor(
+            db,
+            base_symbol,
+            latest_local_ms,
+            "running",
+            {"cutoff_ms": cutoff_ms},
+            started_at=symbol_started_at,
+            completed_at=None,
+        )
+
         gap_days = max((cutoff_ms - latest_local_ms) / (24 * 60 * 60_000), 0)
         if gap_days > settings.okx_incremental_max_gap_days:
+            message = "gap_too_large_for_incremental_api_sync"
+            failures.append(
+                {
+                    "base_symbol": base_symbol,
+                    "reason": message,
+                    "gap_days": round(gap_days, 2),
+                    "max_gap_days": settings.okx_incremental_max_gap_days,
+                }
+            )
             upsert_sync_cursor(
                 db,
                 base_symbol,
                 latest_local_ms,
-                "skipped",
+                "failed",
                 {
-                    "reason": "gap_too_large_for_incremental_api_sync",
+                    "reason": message,
                     "gap_days": round(gap_days, 2),
                     "max_gap_days": settings.okx_incremental_max_gap_days,
+                    "cutoff_ms": cutoff_ms,
                 },
+                started_at=symbol_started_at,
+                completed_at=utc_now(),
             )
             continue
+
         if latest_local_ms >= cutoff_ms:
-            upsert_sync_cursor(db, base_symbol, latest_local_ms, "completed", {"reason": "already_current"})
+            synced_symbols += 1
+            upsert_sync_cursor(
+                db,
+                base_symbol,
+                latest_local_ms,
+                "completed",
+                {"reason": "already_current", "cutoff_ms": cutoff_ms},
+                started_at=symbol_started_at,
+                completed_at=utc_now(),
+            )
             continue
-        inserted_rows, last_synced_ms = sync_symbol_from_okx(db, base_symbol, latest_local_ms, cutoff_ms)
+
+        try:
+            inserted_for_symbol, last_synced_ms = sync_symbol_from_okx(db, base_symbol, latest_local_ms, cutoff_ms)
+        except Exception as exc:
+            db.rollback()
+            failures.append(
+                {
+                    "base_symbol": base_symbol,
+                    "reason": "sync_error",
+                    "message": str(exc),
+                }
+            )
+            upsert_sync_cursor(
+                db,
+                base_symbol,
+                latest_local_ms,
+                "failed",
+                {"reason": "sync_error", "message": str(exc), "cutoff_ms": cutoff_ms},
+                started_at=symbol_started_at,
+                completed_at=utc_now(),
+            )
+            continue
+
+        inserted_rows += inserted_for_symbol
+        synced_symbols += 1
         upsert_sync_cursor(
             db,
             base_symbol,
             last_synced_ms,
             "completed",
-            {"inserted_rows": inserted_rows, "cutoff_ms": cutoff_ms},
+            {"inserted_rows": inserted_for_symbol, "cutoff_ms": cutoff_ms},
+            started_at=symbol_started_at,
+            completed_at=utc_now(),
         )
-        synced_count += 1
-    return synced_count
+
+    coverage_start_ms_after, coverage_end_ms_after = get_market_data_coverage_ms(db)
+    advanced_coverage = _coverage_advanced(coverage_end_ms_before, coverage_end_ms_after)
+    completed_at = utc_now()
+    success = not failures
+    status = "failed"
+    error_message = None
+    if success:
+        status = "succeeded" if advanced_coverage else "no_advance"
+    elif failures:
+        status = "failed"
+        error_message = "; ".join(_format_failure_message(item) for item in failures)
+
+    return MarketSyncSweepResult(
+        success=success,
+        status=status,
+        started_at_ms=datetime_to_ms(started_at),
+        completed_at_ms=datetime_to_ms(completed_at),
+        coverage_start_ms_before=coverage_start_ms_before,
+        coverage_end_ms_before=coverage_end_ms_before,
+        coverage_start_ms_after=coverage_start_ms_after,
+        coverage_end_ms_after=coverage_end_ms_after,
+        advanced_coverage=advanced_coverage,
+        inserted_rows=inserted_rows,
+        synced_symbols=synced_symbols,
+        failures=failures,
+        error_message=error_message,
+        cutoff_ms=cutoff_ms,
+    )
 
 
 def sync_symbol_from_okx(db: Session, base_symbol: str, latest_local_ms: int, cutoff_ms: int) -> tuple[int, int]:
@@ -388,7 +592,16 @@ def fetch_okx_history_candles(base_symbol: str, before_open_time_ms: int) -> lis
     return list(reversed(data))
 
 
-def upsert_sync_cursor(db: Session, base_symbol: str, last_synced_open_time_ms: int, status: str, notes: dict[str, Any]) -> None:
+def upsert_sync_cursor(
+    db: Session,
+    base_symbol: str,
+    last_synced_open_time_ms: int,
+    status: str,
+    notes: dict[str, Any],
+    *,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
+) -> None:
     cursor = db.scalar(
         select(MarketSyncCursor).where(
             MarketSyncCursor.exchange == "okx",
@@ -408,7 +621,10 @@ def upsert_sync_cursor(db: Session, base_symbol: str, last_synced_open_time_ms: 
     cursor.status = status
     cursor.last_synced_open_time_ms = last_synced_open_time_ms
     cursor.notes_json = notes
-    cursor.last_sync_completed_at = utc_now()
+    if started_at is not None:
+        cursor.last_sync_started_at = started_at
+    if completed_at is not None:
+        cursor.last_sync_completed_at = completed_at
     db.add(cursor)
     db.commit()
 
@@ -422,3 +638,20 @@ def parse_optional_float(value: str | float | None) -> float | None:
     if value in {None, "", "None", "null"}:
         return None
     return float(value)
+
+
+def _coverage_advanced(before_ms: int | None, after_ms: int | None) -> bool:
+    if after_ms is None:
+        return False
+    if before_ms is None:
+        return True
+    return after_ms > before_ms
+
+
+def _format_failure_message(failure: dict[str, Any]) -> str:
+    symbol = failure.get("base_symbol") or "unknown"
+    reason = failure.get("reason") or "sync_error"
+    message = failure.get("message")
+    if message:
+        return f"{symbol}:{reason}:{message}"
+    return f"{symbol}:{reason}"

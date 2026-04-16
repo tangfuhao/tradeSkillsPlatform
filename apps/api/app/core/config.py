@@ -21,8 +21,6 @@ class Settings(BaseSettings):
     tool_gateway_shared_secret: str = ""
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"])
     default_benchmark: str = "market_passive_reference"
-    scheduler_timezone: str = "UTC"
-    scheduler_coalesce: bool = True
     agent_runner_timeout_seconds: float = 180.0
     historical_data_dir: Path = DEFAULT_HISTORICAL_DATA_DIR
     historical_csv_glob: str = "allswap-candlesticks-*.csv"
@@ -36,6 +34,8 @@ class Settings(BaseSettings):
     okx_incremental_max_gap_days: int = 7
     market_scan_limit_default: int = 50
     startup_sync_target_offset_days: int = 1
+    market_sync_loop_interval_seconds: float = 60.0
+    live_data_freshness_seconds: float = 180.0
 
     model_config = SettingsConfigDict(
         env_prefix="TRADE_SKILLS_",

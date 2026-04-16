@@ -18,9 +18,8 @@ The platform SHALL accept lifecycle control commands only when the requested act
 - **THEN** the platform rejects the command with a validation error instead of silently ignoring it
 
 ### Requirement: Execution deletion SHALL remove scope-owned execution artifacts
-Deleting an execution scope SHALL remove the artifacts owned by that scope, including scheduler registrations, traces or signals, and execution-scoped portfolio or state records.
+Deleting an execution scope SHALL remove the artifacts owned by that scope, including traces or signals and execution-scoped portfolio or state records, so no sync-driven runtime state remains dispatchable afterward.
 
 #### Scenario: Execution scope is deleted
 - **WHEN** a user deletes a backtest or live runtime
 - **THEN** the platform removes the owned execution artifacts for that scope so no orphaned execution state remains
-

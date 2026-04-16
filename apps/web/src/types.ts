@@ -210,6 +210,7 @@ export type LiveTask = {
   available_actions: ExecutionAction[];
   last_activity_at_ms: number | null;
   last_triggered_at_ms: number | null;
+  last_completed_slot_as_of_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
 };
@@ -230,6 +231,7 @@ export type LiveSignal = {
     provider?: string;
     error_message?: string;
     execution_time_ms?: number | null;
+    trigger_origin?: string | null;
     execution_timing?: ExecutionTiming | null;
     execution_breakdown?: ExecutionBreakdown | null;
     llm_rounds?: LlmRoundSummary[];

@@ -188,7 +188,7 @@ export default function StrategiesPage() {
     try {
       if (action === 'create_live_task') {
         await createLiveTask({ skill_id: skill.id });
-        toast.success(`实时任务已启动：${skill.title}`);
+        toast.success(`实时任务已启动：${skill.title}，等待下一次有效行情同步`);
       } else if (action === 'delete') {
         await deleteSkill(skill.id);
         toast.success(`策略已删除：${skill.title}`);
@@ -497,7 +497,7 @@ export default function StrategiesPage() {
                                   </div>
                                   <div className="spec-main">
                                     <strong>{formatCount(liveTask.available_actions.filter((action) => action !== 'delete').length)}</strong>
-                                    <p>可以暂停、继续、停止或立即触发当前实例。</p>
+                                    <p>可以暂停、继续、停止，或在 sync 健康时立即触发当前实例。</p>
                                   </div>
                                   <div className="spec-side">
                                     <span className="spec-side-label">动作</span>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
@@ -22,7 +22,7 @@ from app.models import (
     StrategyState,
     TraceExecutionDetail,
 )
-from app.runtime.scheduler import SchedulerManager
+from app.runtime.market_sync_loop import MarketSyncLoopManager, MarketSyncLoopSnapshot
 from app.services.agent_runner_client import AgentRunnerErrorDetail, AgentRunnerRequestError
 from app.services.agent_run_recovery import AgentRunRecoveryError
 from app.services.backtest_service import BacktestService, execute_backtest_job
@@ -37,7 +37,16 @@ from app.services.execution_lifecycle import (
     LIVE_STATUS_PAUSED,
     LIVE_STATUS_STOPPED,
 )
-from app.services.live_service import LiveTaskOwnershipError, LiveTaskService, execute_live_task
+from app.services.live_service import (
+    LiveTaskConflictError,
+    LiveTaskOwnershipError,
+    LiveTaskService,
+    LiveTaskTriggerRejectedError,
+    dispatch_sync_driven_live_tasks,
+    execute_live_task,
+    trigger_live_task_manually,
+)
+from app.services.market_data_sync import MarketSyncSweepResult
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, LIVE_SCOPE_KIND
 from app.services.serializers import trace_to_dict
 
@@ -682,34 +691,31 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
             ),
         ):
-            signal = execute_live_task(task_id)
+            signal = execute_live_task(task_id, slot_as_of_ms=1_710_000_000_000, raise_on_reject=True)
 
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertEqual(signal["delivery_status"], "stored")
         self.assertEqual(signal["signal"]["action"], "skip")
+        self.assertEqual(signal["signal"]["trigger_origin"], "manual")
+        self.assertEqual(signal["signal"]["execution_time_ms"], 1_710_000_000_000)
         self.assertIn("portfolio_after", signal["signal"])
         self.assertEqual(signal["signal"]["fills"], [])
 
         with self.session_factory() as db:
-            paused_payload, pause_effect = LiveTaskService(db).control_task(task_id, "pause")
+            paused_payload = LiveTaskService(db).control_task(task_id, "pause")
             self.assertEqual(paused_payload["status"], LIVE_STATUS_PAUSED)
-            self.assertEqual(pause_effect, "unschedule")
 
         with self.session_factory() as db:
-            resumed_payload, resume_effect = LiveTaskService(db).control_task(task_id, "resume")
+            resumed_payload = LiveTaskService(db).control_task(task_id, "resume")
             self.assertEqual(resumed_payload["status"], LIVE_STATUS_ACTIVE)
-            self.assertEqual(resume_effect, "schedule")
 
         with self.session_factory() as db:
-            stopped_payload, stop_effect = LiveTaskService(db).control_task(task_id, "stop")
+            stopped_payload = LiveTaskService(db).control_task(task_id, "stop")
             self.assertEqual(stopped_payload["status"], LIVE_STATUS_STOPPED)
-            self.assertEqual(stop_effect, "unschedule")
 
-        with patch("app.services.execution_cleanup.scheduler_manager.unschedule_live_task") as unschedule_mock:
-            with self.session_factory() as db:
-                LiveTaskService(db).delete_task(task_id)
-            unschedule_mock.assert_called_once_with(task_id)
+        with self.session_factory() as db:
+            LiveTaskService(db).delete_task(task_id)
 
         self.assertEqual(self.count_rows(LiveTask, LiveTask.id == task_id), 0)
         self.assertEqual(self.count_rows(LiveSignal, LiveSignal.live_task_id == task_id), 0)
@@ -753,13 +759,19 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 return_value=(response_payload, {"attempt_count": 2, "recovered": True, "retry_count": 1}),
             ),
         ):
-            signal = execute_live_task(task_id)
+            signal = execute_live_task(task_id, slot_as_of_ms=1_710_000_900_000, raise_on_reject=True)
 
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertEqual(signal["delivery_status"], "stored")
         self.assertEqual(signal["signal"]["recovery"]["attempt_count"], 2)
         self.assertTrue(signal["signal"]["recovery"]["recovered"])
+
+        with self.session_factory() as db:
+            task = db.get(LiveTask, task_id)
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(task.last_completed_slot_as_of_ms, 1_710_000_900_000)
 
     def test_live_runtime_failed_retry_keeps_task_active(self) -> None:
         skill = self.create_skill(title="Live Failure Skill")
@@ -788,7 +800,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 side_effect=AgentRunRecoveryError(attempt_count=3, final_error=final_error),
             ),
         ):
-            signal = execute_live_task(task_id)
+            signal = execute_live_task(task_id, slot_as_of_ms=1_710_001_800_000, raise_on_reject=True)
 
         self.assertIsNotNone(signal)
         assert signal is not None
@@ -801,6 +813,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(task)
             assert task is not None
             self.assertEqual(task.status, LIVE_STATUS_ACTIVE)
+            self.assertIsNone(task.last_completed_slot_as_of_ms)
 
     def test_live_runtime_rolls_back_state_patch_when_execution_fails_after_agent_response(self) -> None:
         skill = self.create_skill(title="Live State Rollback")
@@ -833,7 +846,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 side_effect=RuntimeError("synthetic live apply failure"),
             ),
         ):
-            signal = execute_live_task(task_id)
+            signal = execute_live_task(task_id, slot_as_of_ms=1_710_002_700_000, raise_on_reject=True)
 
         self.assertIsNotNone(signal)
         assert signal is not None
@@ -898,32 +911,87 @@ class ExecutionLifecycleTests(unittest.TestCase):
         self.assertEqual(payload["llm_rounds"], [])
         self.assertNotIn("_execution_timing", payload["decision"])
 
-    def test_scheduler_restore_only_reschedules_active_live_tasks(self) -> None:
-        active_skill = self.create_skill(title="Active Skill")
-        paused_skill = self.create_skill(title="Paused Skill")
-        stopped_skill = self.create_skill(title="Stopped Skill")
+    def test_market_sync_loop_dispatches_only_on_successful_coverage_advance(self) -> None:
+        dispatcher = MagicMock(return_value=[])
+        base_result = {
+            "started_at_ms": 1_710_000_000_000,
+            "completed_at_ms": 1_710_000_000_500,
+            "coverage_start_ms_before": 1_709_999_000_000,
+            "coverage_end_ms_before": 1_710_000_000_000,
+            "coverage_start_ms_after": 1_709_999_000_000,
+            "inserted_rows": 12,
+            "synced_symbols": 3,
+            "failures": [],
+            "cutoff_ms": 1_710_000_060_000,
+        }
+        success_result = MarketSyncSweepResult(
+            success=True,
+            status="succeeded",
+            coverage_end_ms_after=1_710_000_060_000,
+            advanced_coverage=True,
+            error_message=None,
+            **base_result,
+        )
+        manager = MarketSyncLoopManager(
+            session_factory=self.session_factory,
+            sync_runner=lambda _db: success_result,
+            dispatcher=dispatcher,
+        )
+
+        manager.run_cycle_once()
+
+        dispatcher.assert_called_once_with(1_710_000_060_000)
+        snapshot = manager.get_snapshot()
+        self.assertEqual(snapshot.last_sync_status, "succeeded")
+        self.assertEqual(snapshot.last_successful_coverage_end_ms, 1_710_000_060_000)
+
+        failed_failures = [{"base_symbol": "BTC-USDT-SWAP", "reason": "sync_error"}]
+        for result in [
+            MarketSyncSweepResult(
+                success=True,
+                status="no_advance",
+                coverage_end_ms_after=1_710_000_060_000,
+                advanced_coverage=False,
+                error_message=None,
+                **base_result,
+            ),
+            MarketSyncSweepResult(
+                success=False,
+                status="failed",
+                coverage_end_ms_after=1_710_000_060_000,
+                advanced_coverage=True,
+                error_message="partial failure",
+                **{**base_result, "failures": failed_failures},
+            ),
+        ]:
+            dispatcher.reset_mock()
+            manager = MarketSyncLoopManager(
+                session_factory=self.session_factory,
+                sync_runner=lambda _db, result=result: result,
+                dispatcher=dispatcher,
+            )
+            manager.run_cycle_once()
+            dispatcher.assert_not_called()
+
+    def test_sync_driven_dispatch_aligns_slots_to_task_cadence(self) -> None:
+        skill_one_minute = self.create_skill(title="One Minute Skill", cadence="1m")
+        skill_fifteen_minute = self.create_skill(title="Fifteen Minute Skill", cadence="15m")
+        coverage_end_ms = int(datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc).timestamp() * 1000)
 
         with self.session_factory() as db:
             db.add_all(
                 [
                     LiveTask(
                         id=self.make_id("live"),
-                        skill_id=active_skill.id,
+                        skill_id=skill_one_minute.id,
                         status=LIVE_STATUS_ACTIVE,
-                        cadence="15m",
-                        cadence_seconds=900,
+                        cadence="1m",
+                        cadence_seconds=60,
                     ),
                     LiveTask(
                         id=self.make_id("live"),
-                        skill_id=paused_skill.id,
-                        status=LIVE_STATUS_PAUSED,
-                        cadence="15m",
-                        cadence_seconds=900,
-                    ),
-                    LiveTask(
-                        id=self.make_id("live"),
-                        skill_id=stopped_skill.id,
-                        status=LIVE_STATUS_STOPPED,
+                        skill_id=skill_fifteen_minute.id,
+                        status=LIVE_STATUS_ACTIVE,
                         cadence="15m",
                         cadence_seconds=900,
                     ),
@@ -931,16 +999,160 @@ class ExecutionLifecycleTests(unittest.TestCase):
             )
             db.commit()
 
-        manager = SchedulerManager()
-        manager.start = MagicMock()
-        manager.schedule_live_task = MagicMock()
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.execute_live_task") as execute_mock,
+        ):
+            dispatch_sync_driven_live_tasks(coverage_end_ms)
 
-        with patch("app.runtime.scheduler.SessionLocal", self.session_factory):
-            manager.restore_live_tasks()
+        called_slots = [call.kwargs["slot_as_of_ms"] for call in execute_mock.call_args_list]
+        self.assertIn(coverage_end_ms, called_slots)
+        expected_fifteen_minute_slot = int(datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertIn(expected_fifteen_minute_slot, called_slots)
 
-        manager.start.assert_called_once()
-        manager.schedule_live_task.assert_has_calls([call(unittest.mock.ANY, 900)])
-        self.assertEqual(manager.schedule_live_task.call_count, 1)
+    def test_sync_driven_dispatch_retries_latest_missing_slot_without_backlog_replay(self) -> None:
+        skill = self.create_skill(title="Recovery Slot Skill", cadence="15m")
+        checkpoint_ms = int(datetime(2024, 1, 1, 12, 15, tzinfo=timezone.utc).timestamp() * 1000)
+        first_retry_coverage_ms = int(datetime(2024, 1, 1, 12, 31, tzinfo=timezone.utc).timestamp() * 1000)
+        second_retry_coverage_ms = int(datetime(2024, 1, 1, 12, 32, tzinfo=timezone.utc).timestamp() * 1000)
+        later_coverage_ms = int(datetime(2024, 1, 1, 12, 46, tzinfo=timezone.utc).timestamp() * 1000)
+
+        with self.session_factory() as db:
+            db.add(
+                LiveTask(
+                    id=self.make_id("live"),
+                    skill_id=skill.id,
+                    status=LIVE_STATUS_ACTIVE,
+                    cadence="15m",
+                    cadence_seconds=900,
+                    last_completed_slot_as_of_ms=checkpoint_ms,
+                )
+            )
+            db.commit()
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.execute_live_task") as execute_mock,
+        ):
+            dispatch_sync_driven_live_tasks(first_retry_coverage_ms)
+            dispatch_sync_driven_live_tasks(second_retry_coverage_ms)
+            dispatch_sync_driven_live_tasks(later_coverage_ms)
+
+        observed_slots = [call.kwargs["slot_as_of_ms"] for call in execute_mock.call_args_list]
+        expected_retry_slot = int(datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        expected_latest_slot = int(datetime(2024, 1, 1, 12, 45, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(observed_slots[:2], [expected_retry_slot, expected_retry_slot])
+        self.assertEqual(observed_slots[-1], expected_latest_slot)
+
+    def test_manual_trigger_requires_healthy_fresh_sync_and_pending_slot(self) -> None:
+        skill = self.create_skill(title="Manual Trigger Skill", cadence="15m")
+        coverage_end_ms = int(datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc).timestamp() * 1000)
+        expected_slot_ms = int(datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc).timestamp() * 1000)
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        healthy_snapshot = MarketSyncLoopSnapshot(
+            market_sync_loop_running=True,
+            last_sync_started_at_ms=1_710_000_000_000,
+            last_sync_completed_at_ms=1_710_000_000_500,
+            last_sync_status="succeeded",
+            last_sync_error=None,
+            last_successful_sync_completed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            last_successful_coverage_end_ms=coverage_end_ms,
+        )
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.get_live_sync_gate_snapshot", return_value=healthy_snapshot),
+            patch(
+                "app.services.live_service.execute_live_task",
+                return_value={
+                    "id": self.make_id("sig"),
+                    "live_task_id": task_id,
+                    "trigger_time_ms": healthy_snapshot.last_successful_sync_completed_at_ms,
+                    "delivery_status": "stored",
+                    "signal": {"execution_time_ms": expected_slot_ms},
+                    "created_at_ms": healthy_snapshot.last_successful_sync_completed_at_ms,
+                },
+            ) as execute_mock,
+        ):
+            trigger_live_task_manually(task_id)
+
+        execute_mock.assert_called_once()
+        self.assertEqual(execute_mock.call_args.kwargs["slot_as_of_ms"], expected_slot_ms)
+
+        stale_snapshot = MarketSyncLoopSnapshot(
+            market_sync_loop_running=True,
+            last_sync_started_at_ms=1,
+            last_sync_completed_at_ms=2,
+            last_sync_status="succeeded",
+            last_sync_error=None,
+            last_successful_sync_completed_at_ms=1,
+            last_successful_coverage_end_ms=coverage_end_ms,
+        )
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.get_live_sync_gate_snapshot", return_value=stale_snapshot),
+        ):
+            with self.assertRaises(LiveTaskTriggerRejectedError):
+                trigger_live_task_manually(task_id)
+
+        unhealthy_snapshot = MarketSyncLoopSnapshot(
+            market_sync_loop_running=True,
+            last_sync_started_at_ms=1,
+            last_sync_completed_at_ms=2,
+            last_sync_status="failed",
+            last_sync_error="sync failure",
+            last_successful_sync_completed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            last_successful_coverage_end_ms=coverage_end_ms,
+        )
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.get_live_sync_gate_snapshot", return_value=unhealthy_snapshot),
+        ):
+            with self.assertRaises(LiveTaskTriggerRejectedError):
+                trigger_live_task_manually(task_id)
+
+        with self.session_factory() as db:
+            task = db.get(LiveTask, task_id)
+            self.assertIsNotNone(task)
+            assert task is not None
+            task.last_completed_slot_as_of_ms = expected_slot_ms
+            db.add(task)
+            db.commit()
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.get_live_sync_gate_snapshot", return_value=healthy_snapshot),
+        ):
+            with self.assertRaises(LiveTaskTriggerRejectedError):
+                trigger_live_task_manually(task_id)
+
+    def test_manual_trigger_conflict_raises_error(self) -> None:
+        skill = self.create_skill(title="Manual Conflict Skill", cadence="15m")
+        coverage_end_ms = int(datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc).timestamp() * 1000)
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        healthy_snapshot = MarketSyncLoopSnapshot(
+            market_sync_loop_running=True,
+            last_sync_started_at_ms=1,
+            last_sync_completed_at_ms=2,
+            last_sync_status="succeeded",
+            last_sync_error=None,
+            last_successful_sync_completed_at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            last_successful_coverage_end_ms=coverage_end_ms,
+        )
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch("app.services.live_service.get_live_sync_gate_snapshot", return_value=healthy_snapshot),
+            patch("app.services.live_service.execute_live_task", side_effect=LiveTaskConflictError("busy")),
+        ):
+            with self.assertRaises(LiveTaskConflictError):
+                trigger_live_task_manually(task_id)
 
     def test_delete_strategy_cascade_removes_linked_execution_artifacts(self) -> None:
         skill = self.create_skill(title="Cascade Skill")
@@ -1076,10 +1288,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
             stored_skill = db.get(Skill, skill.id)
             self.assertIsNotNone(stored_skill)
-            with patch("app.services.execution_cleanup.scheduler_manager.unschedule_live_task") as unschedule_mock:
-                delete_strategy_cascade(db, stored_skill)
-                db.commit()
-                unschedule_mock.assert_called_once_with(task_id)
+            delete_strategy_cascade(db, stored_skill)
+            db.commit()
 
         self.assertEqual(self.count_rows(Skill, Skill.id == skill.id), 0)
         self.assertEqual(self.count_rows(BacktestRun, BacktestRun.skill_id == skill.id), 0)

@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
-from app.runtime.scheduler import scheduler_manager
+from app.runtime.market_sync_loop import market_sync_loop_manager
 from app.services.market_data_sync import run_startup_market_data_sync
 from app.services.utils import datetime_to_ms, utc_now
 
@@ -17,24 +17,29 @@ logger = logging.getLogger(__name__)
 
 def ensure_runtime_schema() -> None:
     inspector = inspect(engine)
-    if "backtest_runs" not in inspector.get_table_names():
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("backtest_runs")}
+    table_names = set(inspector.get_table_names())
     statements: list[str] = []
 
-    if "total_trigger_count" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN total_trigger_count INTEGER NOT NULL DEFAULT 0")
-    if "completed_trigger_count" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN completed_trigger_count INTEGER NOT NULL DEFAULT 0")
-    if "control_requested" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN control_requested VARCHAR(32)")
-    if "last_processed_trace_index" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trace_index INTEGER")
-    if "last_processed_trigger_time_ms" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trigger_time_ms BIGINT")
-    if "last_runtime_error_json" not in existing_columns:
-        statements.append("ALTER TABLE backtest_runs ADD COLUMN last_runtime_error_json JSON")
+    if "backtest_runs" in table_names:
+        existing_columns = {column["name"] for column in inspector.get_columns("backtest_runs")}
+
+        if "total_trigger_count" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN total_trigger_count INTEGER NOT NULL DEFAULT 0")
+        if "completed_trigger_count" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN completed_trigger_count INTEGER NOT NULL DEFAULT 0")
+        if "control_requested" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN control_requested VARCHAR(32)")
+        if "last_processed_trace_index" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trace_index INTEGER")
+        if "last_processed_trigger_time_ms" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_processed_trigger_time_ms BIGINT")
+        if "last_runtime_error_json" not in existing_columns:
+            statements.append("ALTER TABLE backtest_runs ADD COLUMN last_runtime_error_json JSON")
+
+    if "live_tasks" in table_names:
+        existing_live_columns = {column["name"] for column in inspector.get_columns("live_tasks")}
+        if "last_completed_slot_as_of_ms" not in existing_live_columns:
+            statements.append("ALTER TABLE live_tasks ADD COLUMN last_completed_slot_as_of_ms BIGINT")
 
     if not statements:
         return
@@ -59,20 +64,30 @@ def create_app() -> FastAPI:
     def on_startup() -> None:
         Base.metadata.create_all(bind=engine)
         ensure_runtime_schema()
+        startup_sync_result = None
         if settings.startup_sync_blocking:
             with SessionLocal() as db:
                 try:
                     summary = run_startup_market_data_sync(db)
+                    startup_sync_result = summary.get("sync_sweep_result")
                     logger.info("Startup market-data sync complete: %s", summary)
                 except Exception:
                     logger.exception("Startup market-data sync failed.")
                     if settings.startup_sync_require_success:
                         raise
-        scheduler_manager.restore_live_tasks()
+        if startup_sync_result is not None:
+            market_sync_loop_manager.record_sync_result(startup_sync_result)
+        market_sync_loop_manager.start()
+        if startup_sync_result is not None and startup_sync_result.is_healthy():
+            try:
+                dispatch_results = market_sync_loop_manager.dispatch_current_coverage()
+                logger.info("Initial live eligibility evaluation complete: %s", dispatch_results)
+            except Exception:
+                logger.exception("Initial live eligibility evaluation failed.")
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:
-        scheduler_manager.shutdown()
+        market_sync_loop_manager.shutdown()
 
     @app.get("/healthz")
     def healthz() -> dict:

@@ -105,6 +105,7 @@ def live_task_to_dict(task: LiveTask) -> dict:
         "available_actions": live_runtime_available_actions(task.status),
         "last_activity_at_ms": last_activity_at_ms(task.created_at, task.updated_at, extra_ms=last_triggered_at_ms),
         "last_triggered_at_ms": last_triggered_at_ms,
+        "last_completed_slot_as_of_ms": task.last_completed_slot_as_of_ms,
         "created_at_ms": datetime_to_ms(task.created_at),
         "updated_at_ms": datetime_to_ms(task.updated_at),
     }
@@ -126,6 +127,7 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "provider": raw_signal.get("provider") if isinstance(raw_signal, dict) else None,
         "error_message": raw_signal.get("error_message") if isinstance(raw_signal, dict) else None,
         "execution_time_ms": raw_signal.get("execution_time_ms") if isinstance(raw_signal, dict) else None,
+        "trigger_origin": raw_signal.get("trigger_origin") if isinstance(raw_signal, dict) else None,
         "portfolio_before": raw_signal.get("portfolio_before") if isinstance(raw_signal, dict) else None,
         "portfolio_after": raw_signal.get("portfolio_after") if isinstance(raw_signal, dict) else None,
         "fills": raw_signal.get("fills") if isinstance(raw_signal, dict) else [],

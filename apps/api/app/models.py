@@ -87,6 +87,7 @@ class LiveTask(Base):
     cadence: Mapped[str] = mapped_column(String(16))
     cadence_seconds: Mapped[int] = mapped_column(Integer)
     last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_completed_slot_as_of_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

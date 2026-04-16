@@ -41,7 +41,7 @@ The platform SHALL allow a validated Skill to be activated as a live runtime usi
 
 #### Scenario: Live task is created from a Skill
 - **WHEN** a user activates live mode for a Skill that has no active or paused live runtime
-- **THEN** the platform creates a live task bound to that Skill and schedules periodic triggers according to the extracted cadence
+- **THEN** the platform creates a live task bound to that Skill and makes it eligible for cadence-aligned execution on future healthy market-sync hooks
 
 #### Scenario: Existing live runtime blocks duplicate activation
 - **WHEN** a user attempts to activate live mode for a Skill that already owns an active or paused live runtime

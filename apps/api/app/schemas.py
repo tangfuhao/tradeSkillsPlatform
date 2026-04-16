@@ -106,6 +106,7 @@ class LiveTaskResponse(BaseModel):
     available_actions: list[str] = Field(default_factory=list)
     last_activity_at_ms: int | None = None
     last_triggered_at_ms: int | None
+    last_completed_slot_as_of_ms: int | None = None
     created_at_ms: int
     updated_at_ms: int
 
@@ -124,8 +125,11 @@ class HealthResponse(BaseModel):
     status: str
     database_url: str
     agent_runner_base_url: str
-    scheduler_running: bool
-    active_scheduler_jobs: int
+    market_sync_loop_running: bool
+    last_sync_started_at_ms: int | None = None
+    last_sync_completed_at_ms: int | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
     server_time_ms: int
 
 

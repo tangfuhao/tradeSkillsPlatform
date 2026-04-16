@@ -335,7 +335,7 @@ export default function ConsolePage() {
       {
         label: '实时任务',
         value: formatCount(activeLiveTasks),
-        detail: activeLiveTasks ? '正在按节奏运行' : '尚未激活实时任务',
+        detail: activeLiveTasks ? '等待同步行情驱动执行' : '尚未激活实时任务',
         tone: 'warm' as const,
       },
       {
@@ -525,11 +525,11 @@ export default function ConsolePage() {
     }
 
     setLoading(true);
-    setMessage('正在根据策略节奏激活实时任务...');
+    setMessage('正在激活实时任务，后续会在真实行情同步到新 slot 后执行...');
     try {
       const created = await createLiveTask({ skill_id: selectedSkill.id });
       setSelectedTaskId(created.id);
-      setMessage(`实时任务 ${created.id} 已激活，执行节奏为 ${created.cadence}。`);
+      setMessage(`实时任务 ${created.id} 已激活，将在同步行情到达后按 ${created.cadence} slot 执行。`);
       await refreshDashboard();
     } catch (error) {
       setMessage(`激活实时任务失败：${getErrorMessage(error)}`);
@@ -769,6 +769,7 @@ export default function ConsolePage() {
                 状态：{selectedTask ? describeStatus(selectedTask.status) : '--'} / 节奏：{selectedTask?.cadence ?? '--'}
               </span>
               <small>上次触发：{formatTime(selectedTask?.last_triggered_at_ms)}</small>
+              <small>最近完成 slot：{formatTime(selectedTask?.last_completed_slot_as_of_ms)}</small>
             </div>
 
             <div className="field-row action-row">

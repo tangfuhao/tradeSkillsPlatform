@@ -2,9 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.runtime.scheduler import scheduler_manager
 from app.schemas import ExecutionControlRequest, LiveSignalResponse, LiveTaskCreateRequest, LiveTaskResponse, PortfolioStateResponse
-from app.services.live_service import LiveTaskOwnershipError, LiveTaskService, execute_live_task
+from app.services.live_service import (
+    LiveTaskConflictError,
+    LiveTaskOwnershipError,
+    LiveTaskService,
+    LiveTaskTriggerRejectedError,
+    trigger_live_task_manually,
+)
 
 
 router = APIRouter(tags=["live"])
@@ -35,15 +40,17 @@ def create_live_task(payload: LiveTaskCreateRequest, db: Session = Depends(get_d
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    scheduler_manager.schedule_live_task(task["id"], task["cadence_seconds"])
     return LiveTaskResponse.model_validate(task)
 
 
 @router.post("/live-tasks/{task_id}/trigger", response_model=LiveSignalResponse)
 def trigger_live_task(task_id: str) -> LiveSignalResponse:
-    signal = execute_live_task(task_id)
-    if signal is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Live task not found or inactive.")
+    try:
+        signal = trigger_live_task_manually(task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (LiveTaskTriggerRejectedError, LiveTaskConflictError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return LiveSignalResponse.model_validate(signal)
 
 
@@ -70,17 +77,11 @@ def control_live_task(
 ) -> LiveTaskResponse:
     service = LiveTaskService(db)
     try:
-        task, scheduler_effect = service.control_task(task_id, payload.action)
+        task = service.control_task(task_id, payload.action)
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-    if scheduler_effect == "schedule":
-        scheduler_manager.schedule_live_task(task["id"], task["cadence_seconds"])
-    elif scheduler_effect == "unschedule":
-        scheduler_manager.unschedule_live_task(task["id"])
-
     return LiveTaskResponse.model_validate(task)
 
 
