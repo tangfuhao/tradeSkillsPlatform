@@ -125,6 +125,7 @@ class HealthResponse(BaseModel):
     status: str
     database_url: str
     agent_runner_base_url: str
+    market_sync: dict[str, Any] = Field(default_factory=dict)
     market_sync_loop_running: bool
     last_sync_started_at_ms: int | None = None
     last_sync_completed_at_ms: int | None = None
@@ -158,6 +159,44 @@ class MarketOverviewResponse(BaseModel):
     coverage_end_ms: int | None
     recent_csv_jobs: list[dict[str, Any]]
     sync_cursors: list[dict[str, Any]]
+    tier1_freshness_ms_p95: int | None = None
+    tier2_freshness_ms_p95: int | None = None
+    bootstrap_pending_count: int = 0
+    backfill_lag_symbol_count: int = 0
+    market_sync: dict[str, Any] = Field(default_factory=dict)
+    latest_coverage_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketSyncStatusResponse(BaseModel):
+    status: str
+    dispatch_as_of_ms: int | None = None
+    coverage_ratio: float = 0.0
+    degraded: bool = False
+    blocked_reason: str | None = None
+    snapshot_age_ms: int | None = None
+    universe_active_count: int = 0
+    fresh_symbol_count: int = 0
+    missing_symbol_count: int = 0
+    missing_symbols_sample: list[str] = Field(default_factory=list)
+    universe_version: int | None = None
+    latest_snapshot: dict[str, Any] = Field(default_factory=dict)
+    recent_errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MarketUniverseItemResponse(BaseModel):
+    instrument_id: str
+    base_symbol: str
+    quote_asset: str
+    instrument_type: str
+    lifecycle_status: str
+    priority_tier: str
+    bootstrap_status: str
+    last_trade_price: float | None = None
+    volume_24h_usd: float | None = None
+    discovered_at_ms: int
+    last_seen_active_at_ms: int | None = None
+    delisted_at_ms: int | None = None
+    sync_state: dict[str, Any] | None = None
 
 
 class ToolGatewayExecuteRequest(BaseModel):

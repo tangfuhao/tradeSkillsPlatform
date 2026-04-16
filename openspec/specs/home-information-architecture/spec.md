@@ -1,7 +1,8 @@
 # home-information-architecture Specification
 
 ## Purpose
-TBD - created by archiving change expand-product-signals-and-strategy-pages. Update Purpose after archive.
+Define the homepage information architecture that introduces TradeSkills as an operational workbench, surfaces summary-level trading context, and routes users into deeper product workflows.
+
 ## Requirements
 ### Requirement: The homepage SHALL guide users into replay, signals, and strategy destinations
 The product homepage SHALL act as a structured workbench hub that prioritizes current live performance, recent backtests, recent strategies, and direct strategy entry while still guiding users into deeper replay, signals, and strategy destinations.

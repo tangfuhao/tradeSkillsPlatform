@@ -7,10 +7,11 @@ from typing import Any, Callable
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.runtime.market_sync_queue import build_market_sync_queue
 from app.services.market_data_sync import (
     MarketSyncSweepResult,
     compute_live_sync_cutoff,
-    get_market_data_coverage_ms,
+    get_latest_market_coverage_snapshot,
     sync_incremental_okx_history,
 )
 
@@ -27,6 +28,14 @@ class MarketSyncLoopSnapshot:
     last_sync_error: str | None = None
     last_successful_sync_completed_at_ms: int | None = None
     last_successful_coverage_end_ms: int | None = None
+    universe_active_count: int = 0
+    fresh_symbol_count: int = 0
+    coverage_ratio: float = 0.0
+    degraded: bool = False
+    snapshot_age_ms: int | None = None
+    blocked_reason: str | None = None
+    missing_symbol_count: int = 0
+    universe_version: int | None = None
 
 
 class MarketSyncLoopManager:
@@ -48,6 +57,10 @@ class MarketSyncLoopManager:
         self._snapshot = MarketSyncLoopSnapshot()
 
     def start(self) -> None:
+        if settings.market_sync_queue_enabled:
+            with self._state_lock:
+                self._snapshot = replace(self._snapshot, market_sync_loop_running=False)
+            return
         with self._state_lock:
             if self._snapshot.market_sync_loop_running:
                 return
@@ -61,6 +74,10 @@ class MarketSyncLoopManager:
             self._thread.start()
 
     def shutdown(self) -> None:
+        if settings.market_sync_queue_enabled:
+            with self._state_lock:
+                self._snapshot = replace(self._snapshot, market_sync_loop_running=False)
+            return
         with self._state_lock:
             if not self._snapshot.market_sync_loop_running:
                 return
@@ -71,6 +88,38 @@ class MarketSyncLoopManager:
             thread.join(timeout=max(self._interval_seconds, 1.0) + 5.0)
 
     def get_snapshot(self) -> MarketSyncLoopSnapshot:
+        if settings.market_sync_queue_enabled:
+            try:
+                queue = build_market_sync_queue()
+                heartbeat = queue.read_heartbeat()
+                queue.close()
+            except Exception:
+                logger.exception("Failed to read market sync worker heartbeat.")
+                with self._state_lock:
+                    return replace(self._snapshot, market_sync_loop_running=False, last_sync_status="failed")
+            with self._state_lock:
+                if heartbeat is None:
+                    return replace(self._snapshot, market_sync_loop_running=False)
+                external_snapshot = replace(
+                    self._snapshot,
+                    market_sync_loop_running=True,
+                    last_sync_started_at_ms=heartbeat.get("last_sync_started_at_ms"),
+                    last_sync_completed_at_ms=heartbeat.get("last_sync_completed_at_ms"),
+                    last_sync_status=heartbeat.get("last_sync_status"),
+                    last_sync_error=heartbeat.get("last_sync_error"),
+                    last_successful_sync_completed_at_ms=heartbeat.get("last_successful_sync_completed_at_ms"),
+                    last_successful_coverage_end_ms=heartbeat.get("last_successful_coverage_end_ms"),
+                    universe_active_count=int(heartbeat.get("universe_active_count") or 0),
+                    fresh_symbol_count=int(heartbeat.get("fresh_symbol_count") or 0),
+                    coverage_ratio=float(heartbeat.get("coverage_ratio") or 0.0),
+                    degraded=bool(heartbeat.get("degraded") or False),
+                    snapshot_age_ms=heartbeat.get("snapshot_age_ms"),
+                    blocked_reason=heartbeat.get("blocked_reason"),
+                    missing_symbol_count=int(heartbeat.get("missing_symbol_count") or 0),
+                    universe_version=heartbeat.get("universe_version"),
+                )
+                self._snapshot = external_snapshot
+                return replace(self._snapshot)
         with self._state_lock:
             return replace(self._snapshot)
 
@@ -89,6 +138,17 @@ class MarketSyncLoopManager:
                     last_successful_sync_completed_at_ms=result.completed_at_ms,
                     last_successful_coverage_end_ms=result.coverage_end_ms_after,
                 )
+            next_snapshot = replace(
+                next_snapshot,
+                universe_active_count=result.universe_active_count,
+                fresh_symbol_count=result.fresh_symbol_count,
+                coverage_ratio=result.coverage_ratio,
+                degraded=result.degraded,
+                snapshot_age_ms=result.snapshot_age_ms,
+                blocked_reason=result.blocked_reason,
+                missing_symbol_count=result.missing_symbol_count,
+                universe_version=result.universe_version,
+            )
             self._snapshot = next_snapshot
             return replace(self._snapshot)
 
@@ -109,10 +169,10 @@ class MarketSyncLoopManager:
 
     def dispatch_current_coverage(self) -> list[dict[str, Any]]:
         with self._session_factory() as db:
-            _, coverage_end_ms = get_market_data_coverage_ms(db)
-        if coverage_end_ms is None:
+            snapshot = get_latest_market_coverage_snapshot(db)
+        if snapshot is None or snapshot.get("dispatch_as_of_ms") is None:
             return []
-        return self._dispatcher(coverage_end_ms)
+        return self._dispatcher(int(snapshot["dispatch_as_of_ms"]))
 
     def _run_loop(self) -> None:
         while not self._stop_event.wait(self._interval_seconds):

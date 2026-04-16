@@ -1,7 +1,8 @@
 # backtest-simulation Specification
 
 ## Purpose
-TBD - created by archiving change build-agent-trading-skills-platform. Update Purpose after archive.
+Define how validated trading Skills are executed as replay-based backtests over historical market data, including trigger cadence, as-of isolation, simulated execution, and lifecycle controls.
+
 ## Requirements
 ### Requirement: Users can create replay-based backtest runs from a validated Skill
 The platform SHALL allow a user to create a backtest run by selecting a validated Skill, a historical date range, and an initial capital amount, and SHALL persist a run record before replay execution starts.

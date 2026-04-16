@@ -1,7 +1,8 @@
 # strategy-operations-surface Specification
 
 ## Purpose
-TBD - created by archiving change upgrade-product-workbench-and-controls. Update Purpose after archive.
+Define the strategy management surface that presents strategy ownership, creation entry points, and safe operational actions across linked executions.
+
 ## Requirements
 ### Requirement: Strategy operations surface SHALL present linked execution ownership
 The product-facing strategy management surface SHALL list strategies with immutable identity, linked live-runtime state, recent backtest context, and primary actions.

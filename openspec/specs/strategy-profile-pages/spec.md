@@ -1,7 +1,8 @@
 # strategy-profile-pages Specification
 
 ## Purpose
-TBD - created by archiving change expand-product-signals-and-strategy-pages. Update Purpose after archive.
+Define the product-facing strategy discovery and profile experience that translates stored strategy artifacts and execution context into readable, navigable pages.
+
 ## Requirements
 ### Requirement: Product routes SHALL provide strategy discovery and profile pages
 The product-facing experience SHALL provide strategy routes that support a management-oriented strategy index and a dedicated read-only profile page for each strategy.

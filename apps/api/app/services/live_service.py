@@ -13,6 +13,7 @@ from app.services.agent_run_recovery import AgentRunAborted, AgentRunRecoveryErr
 from app.services.demo_runtime import cadence_to_seconds
 from app.services.execution_cleanup import delete_live_task
 from app.services.execution_lifecycle import LIVE_RUNTIME_OWNING_STATUSES, LIVE_STATUS_ACTIVE, LIVE_STATUS_PAUSED, LIVE_STATUS_STOPPED
+from app.services.market_data_sync import get_fresh_market_symbols_for_dispatch, get_market_sync_gate_status
 from app.services.portfolio_engine import DEFAULT_LIVE_INITIAL_CAPITAL, LIVE_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import live_signal_to_dict, live_task_to_dict
 from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
@@ -199,9 +200,38 @@ def execute_live_task(
                 initial_capital=DEFAULT_LIVE_INITIAL_CAPITAL,
             )
             slot_as_of = ms_to_datetime(effective_slot_as_of_ms)
+            coverage_context = get_market_sync_gate_status(db)
+            if coverage_context.get("dispatch_as_of_ms") is None:
+                coverage_context = {
+                    "status": "healthy",
+                    "dispatch_as_of_ms": effective_slot_as_of_ms,
+                    "coverage_ratio": 1.0,
+                    "degraded": False,
+                    "missing_symbol_count": 0,
+                    "missing_symbols_sample": [],
+                    "universe_version": None,
+                }
 
             try:
-                market_snapshot = build_market_snapshot_for_live(db, as_of=slot_as_of)
+                if (
+                    coverage_context.get("status") in {"healthy", "degraded"}
+                    and coverage_context.get("dispatch_as_of_ms") != effective_slot_as_of_ms
+                ):
+                    raise RuntimeError("Live dispatch coverage is no longer aligned with the pending slot.")
+                fresh_symbols = get_fresh_market_symbols_for_dispatch(db, effective_slot_as_of_ms)
+                if not fresh_symbols:
+                    fresh_symbols = None
+                watchlist = _extract_live_watchlist(skill)
+                if watchlist and fresh_symbols is not None and not watchlist.issubset(fresh_symbols):
+                    missing_watchlist = sorted(watchlist - fresh_symbols)
+                    raise RuntimeError(
+                        f"Live watchlist coverage is incomplete for {', '.join(missing_watchlist[:5])}."
+                    )
+                market_snapshot = build_market_snapshot_for_live(
+                    db,
+                    as_of=slot_as_of,
+                    allowed_market_symbols=fresh_symbols,
+                )
                 snapshot_error = market_snapshot.get("error") if isinstance(market_snapshot, dict) else None
                 if not market_snapshot.get("market_candidates"):
                     raise RuntimeError(
@@ -220,6 +250,12 @@ def execute_live_task(
                     "context": {
                         **market_snapshot,
                         "as_of_ms": effective_slot_as_of_ms,
+                        "dispatch_as_of_ms": coverage_context.get("dispatch_as_of_ms"),
+                        "coverage_ratio": coverage_context.get("coverage_ratio"),
+                        "degraded": coverage_context.get("degraded"),
+                        "missing_symbol_count": coverage_context.get("missing_symbol_count"),
+                        "missing_symbols_sample": coverage_context.get("missing_symbols_sample"),
+                        "universe_version": coverage_context.get("universe_version"),
                         "portfolio_summary": _portfolio_hint(portfolio_before),
                         "tool_gateway": _build_tool_gateway_context(
                             skill_id=skill.id,
@@ -267,6 +303,14 @@ def execute_live_task(
                         "portfolio_before": portfolio_before,
                         "portfolio_after": portfolio_after,
                         "fills": fills,
+                        "coverage": {
+                            "dispatch_as_of_ms": coverage_context.get("dispatch_as_of_ms"),
+                            "coverage_ratio": coverage_context.get("coverage_ratio"),
+                            "degraded": coverage_context.get("degraded"),
+                            "missing_symbol_count": coverage_context.get("missing_symbol_count"),
+                            "missing_symbols_sample": coverage_context.get("missing_symbols_sample"),
+                            "universe_version": coverage_context.get("universe_version"),
+                        },
                         "recovery": recovery,
                     },
                 )
@@ -384,7 +428,13 @@ def trigger_live_task_manually(task_id: str) -> dict[str, Any]:
             raise LiveTaskTriggerRejectedError("No successful live sync has completed yet.")
         if _sync_snapshot_is_stale(sync_snapshot.last_successful_sync_completed_at_ms):
             raise LiveTaskTriggerRejectedError("Live sync state is stale.")
-        coverage_end_ms = sync_snapshot.last_successful_coverage_end_ms
+        gate_status = get_market_sync_gate_status(db)
+        if gate_status.get("dispatch_as_of_ms") is None:
+            coverage_end_ms = sync_snapshot.last_successful_coverage_end_ms
+        else:
+            if gate_status.get("status") not in {"healthy", "degraded"}:
+                raise LiveTaskTriggerRejectedError("Live coverage gate is blocked.")
+            coverage_end_ms = gate_status.get("dispatch_as_of_ms")
         if coverage_end_ms is None:
             raise LiveTaskTriggerRejectedError("No synced market coverage is available yet.")
 
@@ -501,6 +551,30 @@ def _portfolio_hint(portfolio: dict[str, Any]) -> dict[str, Any]:
         "symbols": [item.get("symbol") for item in positions[:5]],
     }
 
+
+
+def _extract_live_watchlist(skill: Skill) -> set[str]:
+    envelope = skill.envelope_json or {}
+    market_context = envelope.get("market_context") if isinstance(envelope, dict) else {}
+    if not isinstance(market_context, dict):
+        return set()
+    raw_symbols = None
+    for key in ("watchlist", "symbols", "named_symbols"):
+        candidate = market_context.get(key)
+        if isinstance(candidate, list):
+            raw_symbols = candidate
+            break
+    if not raw_symbols:
+        return set()
+    watchlist: set[str] = set()
+    for item in raw_symbols:
+        symbol = str(item or "").strip().upper()
+        if not symbol:
+            continue
+        if not symbol.endswith("-USDT-SWAP"):
+            symbol = f"{symbol}-USDT-SWAP"
+        watchlist.add(symbol)
+    return watchlist
 
 
 def _live_retry_should_abort(db: Session, task_id: str) -> bool:

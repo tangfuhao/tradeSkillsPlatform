@@ -1,7 +1,8 @@
 # strategy-skill-management Specification
 
 ## Purpose
-TBD - created by archiving change build-agent-trading-skills-platform. Update Purpose after archive.
+Define how trading Skills are created, validated, normalized into immutable strategy artifacts, and made available for both backtest and live execution contexts.
+
 ## Requirements
 ### Requirement: Users can upload a Markdown trading Skill as raw text
 The platform SHALL allow a user to upload a Markdown Skill as plain text, optionally provide a title override, store the raw source, and validate that the Skill includes an identifiable title, execution cadence, AI reasoning section, and explicit risk-control guidance.

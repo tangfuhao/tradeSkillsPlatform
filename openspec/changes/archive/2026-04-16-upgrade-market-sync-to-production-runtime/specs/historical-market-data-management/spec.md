@@ -1,9 +1,5 @@
-# historical-market-data-management Specification
+## MODIFIED Requirements
 
-## Purpose
-Define how the platform ingests, stores, synchronizes, and exposes historical market data and market-sync coverage so replay and live runtimes can depend on explicit, inspectable data freshness guarantees.
-
-## Requirements
 ### Requirement: Operators can seed and sync local historical market data
 The platform SHALL support operator-managed local historical OKX-style candle ingestion from CSV files, SHALL persist the OKX `SWAP` instrument universe with lifecycle and priority metadata, and SHALL advance recent coverage through symbol-scoped bootstrap, incremental sync, and backfill workflows rather than a single sweep-scoped cursor.
 
@@ -26,20 +22,6 @@ The platform SHALL support operator-managed local historical OKX-style candle in
 #### Scenario: Partial symbol sync progress is preserved across failures
 - **WHEN** a symbol sync worker inserts some candle pages and a later page fails or times out
 - **THEN** the platform keeps the successfully written rows and updated sync cursor, records the failed attempt, and retries the remaining gap according to retry and backoff rules instead of rewinding the symbol
-
-### Requirement: Historical reads are constrained by replay time
-The platform SHALL expose historical market data to backtest tools through time-bounded queries that prevent future-data leakage.
-
-#### Scenario: Candle query respects replay timestamp
-- **WHEN** the replay driver or Tool Gateway invokes a market-data query with an `as_of` boundary
-- **THEN** the tool returns only rows available up to that timestamp
-
-### Requirement: Historical candle APIs can aggregate from stored 1m bars
-The platform SHALL store `1m` candles as the base timeframe and derive larger timeframes from those stored bars when requested.
-
-#### Scenario: User requests a 15m candle series
-- **WHEN** a client requests aggregated candles for a supported market symbol and timeframe such as `15m`
-- **THEN** the platform builds the response from the stored `1m` history within the available coverage window
 
 ### Requirement: Data coverage issues are visible to the runtime and operator
 The platform SHALL surface symbol-level sync freshness and an aggregated market coverage gate so that live runs can fail clearly, operators can inspect the current state, and automatic dispatch only advances from a qualified `dispatch_as_of_ms` snapshot.

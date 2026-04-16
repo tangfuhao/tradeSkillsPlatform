@@ -295,3 +295,102 @@ class MarketSyncCursor(Base):
     notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_sync_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MarketInstrument(Base):
+    __tablename__ = "market_instruments"
+    __table_args__ = (
+        UniqueConstraint("exchange", "instrument_id", name="uq_market_instrument"),
+        Index("ix_market_instrument_lifecycle_tier", "lifecycle_status", "priority_tier"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(16), default="okx", index=True)
+    instrument_id: Mapped[str] = mapped_column(String(128), index=True)
+    base_symbol: Mapped[str] = mapped_column(String(64), index=True)
+    quote_asset: Mapped[str] = mapped_column(String(16), default="USDT")
+    instrument_type: Mapped[str] = mapped_column(String(16), default="SWAP")
+    lifecycle_status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    priority_tier: Mapped[str] = mapped_column(String(16), default="tier2", index=True)
+    bootstrap_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    last_trade_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_24h_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delisted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    missed_refresh_count: Mapped[int] = mapped_column(Integer, default=0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MarketSyncState(Base):
+    __tablename__ = "market_sync_states"
+    __table_args__ = (
+        UniqueConstraint("exchange", "base_symbol", "timeframe", name="uq_market_sync_state_symbol"),
+        Index("ix_market_sync_state_due", "lifecycle_status", "priority_tier", "next_sync_due_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(16), default="okx", index=True)
+    base_symbol: Mapped[str] = mapped_column(String(64), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), default="1m")
+    lifecycle_status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    priority_tier: Mapped[str] = mapped_column(String(16), default="tier2", index=True)
+    last_synced_open_time_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    fresh_coverage_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    next_sync_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class MarketSyncAttempt(Base):
+    __tablename__ = "market_sync_attempts"
+    __table_args__ = (
+        Index("ix_market_sync_attempt_symbol_started", "base_symbol", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(16), default="okx", index=True)
+    base_symbol: Mapped[str] = mapped_column(String(64), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), default="1m")
+    queue_name: Mapped[str] = mapped_column(String(32), default="symbol-sync-normal", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)
+    inserted_rows: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MarketCoverageSnapshot(Base):
+    __tablename__ = "market_coverage_snapshots"
+    __table_args__ = (
+        Index("ix_market_coverage_snapshot_created", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    active_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    fresh_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    tier1_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    tier1_fresh_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    dispatch_as_of_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    degraded: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    universe_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    missing_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    missing_symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

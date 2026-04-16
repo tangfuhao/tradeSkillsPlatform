@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import CsvIngestionJob, MarketCandle, MarketSyncCursor
+from app.models import CsvIngestionJob, MarketCandle, MarketInstrument, MarketSyncState
 from app.services.utils import datetime_to_ms, ms_to_datetime, utc_now
 
 
@@ -136,7 +136,12 @@ def serialize_candle(row: MarketCandle) -> dict[str, Any]:
     }
 
 
-def build_market_snapshot(db: Session, as_of: datetime, limit: int | None = None) -> dict[str, Any]:
+def build_market_snapshot(
+    db: Session,
+    as_of: datetime,
+    limit: int | None = None,
+    allowed_market_symbols: set[str] | None = None,
+) -> dict[str, Any]:
     as_of_ms = datetime_to_ms(as_of)
     start_ms = as_of_ms - (24 * 60 * 60_000)
     rows = db.scalars(
@@ -152,6 +157,8 @@ def build_market_snapshot(db: Session, as_of: datetime, limit: int | None = None
 
     candidates: list[dict[str, Any]] = []
     for market_symbol, symbol_rows in grouped.items():
+        if allowed_market_symbols is not None and market_symbol not in allowed_market_symbols:
+            continue
         if not symbol_rows:
             continue
         first = symbol_rows[0]
@@ -198,11 +205,17 @@ def has_market_data(db: Session) -> bool:
 
 
 def get_market_overview(db: Session) -> dict[str, Any]:
+    from app.services.market_data_sync import get_latest_market_coverage_snapshot, get_market_sync_gate_status
+
     total_candles = db.scalar(select(func.count()).select_from(MarketCandle)) or 0
     total_symbols = db.scalar(select(func.count(func.distinct(MarketCandle.market_symbol))).select_from(MarketCandle)) or 0
     coverage_start, coverage_end = get_market_data_coverage(db)
     jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.started_at.desc()).limit(10)).all()
-    cursors = db.scalars(select(MarketSyncCursor).order_by(MarketSyncCursor.base_symbol.asc())).all()
+    sync_states = db.scalars(select(MarketSyncState).order_by(MarketSyncState.base_symbol.asc())).all()
+    gate_status = get_market_sync_gate_status(db)
+    latest_snapshot = get_latest_market_coverage_snapshot(db) or {}
+    tier1_states = [state for state in sync_states if state.priority_tier == "tier1"]
+    tier2_states = [state for state in sync_states if state.priority_tier == "tier2"]
     return {
         "historical_data_dir": str(settings.historical_data_dir),
         "base_timeframe": settings.historical_base_timeframe,
@@ -227,17 +240,26 @@ def get_market_overview(db: Session) -> dict[str, Any]:
         ],
         "sync_cursors": [
             {
-                "base_symbol": cursor.base_symbol,
-                "timeframe": cursor.timeframe,
-                "status": cursor.status,
-                "last_synced_open_time_ms": cursor.last_synced_open_time_ms,
-                "last_sync_completed_at_ms": datetime_to_ms(cursor.last_sync_completed_at)
-                if cursor.last_sync_completed_at
+                "base_symbol": state.base_symbol,
+                "timeframe": state.timeframe,
+                "status": state.status,
+                "last_synced_open_time_ms": state.last_synced_open_time_ms,
+                "last_sync_completed_at_ms": datetime_to_ms(state.last_sync_completed_at)
+                if state.last_sync_completed_at
                 else None,
-                "notes": cursor.notes_json or {},
+                "notes": state.notes_json or {},
             }
-            for cursor in cursors
+            for state in sync_states
         ],
+        "tier1_freshness_ms_p95": _freshness_p95_ms(tier1_states),
+        "tier2_freshness_ms_p95": _freshness_p95_ms(tier2_states),
+        "bootstrap_pending_count": db.scalar(
+            select(func.count()).select_from(MarketInstrument).where(MarketInstrument.bootstrap_status != "ready")
+        )
+        or 0,
+        "backfill_lag_symbol_count": sum(1 for state in sync_states if (state.notes_json or {}).get("backfill_pending")),
+        "market_sync": gate_status,
+        "latest_coverage_snapshot": latest_snapshot,
     }
 
 
@@ -246,3 +268,80 @@ def list_market_symbols(db: Session) -> list[str]:
         select(MarketCandle.market_symbol).distinct().order_by(MarketCandle.market_symbol.asc())
     ).all()
     return list(rows)
+
+
+def get_market_sync_status(db: Session) -> dict[str, Any]:
+    from app.services.market_data_sync import get_latest_market_coverage_snapshot, get_market_sync_gate_status
+
+    gate_status = get_market_sync_gate_status(db)
+    latest_snapshot = get_latest_market_coverage_snapshot(db) or {}
+    recent_attempts = db.scalars(
+        select(MarketSyncState).where(MarketSyncState.last_error.is_not(None)).order_by(MarketSyncState.updated_at.desc()).limit(10)
+    ).all()
+    return {
+        **gate_status,
+        "latest_snapshot": latest_snapshot,
+        "recent_errors": [
+            {
+                "base_symbol": state.base_symbol,
+                "priority_tier": state.priority_tier,
+                "last_error": state.last_error,
+                "retry_count": state.retry_count,
+                "last_sync_completed_at_ms": datetime_to_ms(state.last_sync_completed_at)
+                if state.last_sync_completed_at
+                else None,
+            }
+            for state in recent_attempts
+        ],
+    }
+
+
+def list_market_universe(db: Session) -> list[dict[str, Any]]:
+    instruments = db.scalars(select(MarketInstrument).order_by(MarketInstrument.priority_tier.asc(), MarketInstrument.instrument_id.asc())).all()
+    states = {
+        state.base_symbol: state
+        for state in db.scalars(select(MarketSyncState)).all()
+    }
+    return [
+        {
+            "instrument_id": instrument.instrument_id,
+            "base_symbol": instrument.base_symbol,
+            "quote_asset": instrument.quote_asset,
+            "instrument_type": instrument.instrument_type,
+            "lifecycle_status": instrument.lifecycle_status,
+            "priority_tier": instrument.priority_tier,
+            "bootstrap_status": instrument.bootstrap_status,
+            "last_trade_price": instrument.last_trade_price,
+            "volume_24h_usd": instrument.volume_24h_usd,
+            "discovered_at_ms": datetime_to_ms(instrument.discovered_at),
+            "last_seen_active_at_ms": datetime_to_ms(instrument.last_seen_active_at) if instrument.last_seen_active_at else None,
+            "delisted_at_ms": datetime_to_ms(instrument.delisted_at) if instrument.delisted_at else None,
+            "sync_state": {
+                "status": states[instrument.instrument_id].status,
+                "last_synced_open_time_ms": states[instrument.instrument_id].last_synced_open_time_ms,
+                "fresh_coverage_end_ms": states[instrument.instrument_id].fresh_coverage_end_ms,
+                "next_sync_due_at_ms": datetime_to_ms(states[instrument.instrument_id].next_sync_due_at)
+                if states[instrument.instrument_id].next_sync_due_at
+                else None,
+                "retry_count": states[instrument.instrument_id].retry_count,
+                "last_error": states[instrument.instrument_id].last_error,
+            }
+            if instrument.instrument_id in states
+            else None,
+        }
+        for instrument in instruments
+    ]
+
+
+def _freshness_p95_ms(states: list[MarketSyncState]) -> int | None:
+    values = []
+    now_ms = datetime_to_ms(utc_now())
+    for state in states:
+        if state.last_sync_completed_at is None:
+            continue
+        values.append(max(now_ms - datetime_to_ms(state.last_sync_completed_at), 0))
+    if not values:
+        return None
+    values.sort()
+    index = max(int(len(values) * 0.95) - 1, 0)
+    return values[index]

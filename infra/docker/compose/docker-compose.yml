@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   agent-runner:
     build:
       context: ../../..
@@ -20,6 +25,20 @@ services:
       - ../../../data:/app/data
     depends_on:
       - agent-runner
+      - redis
+
+  market-sync-worker:
+    build:
+      context: ../../..
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - ../../env/api.env.example
+    command: ["python", "-m", "app.runtime.market_sync_worker"]
+    volumes:
+      - ../../../data:/app/data
+    depends_on:
+      - redis
+      - api
 
   web:
     build:

@@ -131,6 +131,7 @@ def live_signal_to_dict(signal: LiveSignal) -> dict:
         "portfolio_before": raw_signal.get("portfolio_before") if isinstance(raw_signal, dict) else None,
         "portfolio_after": raw_signal.get("portfolio_after") if isinstance(raw_signal, dict) else None,
         "fills": raw_signal.get("fills") if isinstance(raw_signal, dict) else [],
+        "coverage": raw_signal.get("coverage") if isinstance(raw_signal, dict) else None,
         "execution_timing": raw_signal.get("execution_timing") if isinstance(raw_signal, dict) else None,
         "execution_breakdown": raw_signal.get("execution_breakdown") if isinstance(raw_signal, dict) else None,
         "llm_rounds": raw_signal.get("llm_rounds") if isinstance(raw_signal, dict) else [],

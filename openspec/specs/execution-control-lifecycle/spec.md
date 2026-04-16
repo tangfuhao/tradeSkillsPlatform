@@ -1,7 +1,8 @@
 # execution-control-lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change upgrade-product-workbench-and-controls. Update Purpose after archive.
+Define the shared lifecycle metadata and control semantics for execution scopes such as backtests and live runtimes so product surfaces can manage them consistently and safely.
+
 ## Requirements
 ### Requirement: Execution scopes SHALL expose consistent lifecycle metadata
 The platform SHALL expose lifecycle metadata for backtests and live runtimes in a consistent shape that includes current status, linked strategy ownership, last activity, available actions, and progress metadata when applicable.

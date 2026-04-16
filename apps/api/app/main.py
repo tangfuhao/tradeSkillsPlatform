@@ -7,8 +7,9 @@ from sqlalchemy import inspect, text
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import Base, SessionLocal, engine
+from app.runtime.market_sync_queue import build_market_sync_queue
 from app.runtime.market_sync_loop import market_sync_loop_manager
-from app.services.market_data_sync import run_startup_market_data_sync
+from app.services.market_data_sync import import_local_csv_seed_data, run_startup_market_data_sync
 from app.services.utils import datetime_to_ms, utc_now
 
 
@@ -65,25 +66,45 @@ def create_app() -> FastAPI:
         Base.metadata.create_all(bind=engine)
         ensure_runtime_schema()
         startup_sync_result = None
-        if settings.startup_sync_blocking:
+        if settings.market_sync_queue_enabled:
             with SessionLocal() as db:
                 try:
-                    summary = run_startup_market_data_sync(db)
-                    startup_sync_result = summary.get("sync_sweep_result")
-                    logger.info("Startup market-data sync complete: %s", summary)
+                    imported_files = import_local_csv_seed_data(db)
+                    logger.info("Startup CSV import complete for queued market sync: imported_files=%s", imported_files)
                 except Exception:
-                    logger.exception("Startup market-data sync failed.")
+                    logger.exception("Startup CSV import failed.")
                     if settings.startup_sync_require_success:
                         raise
-        if startup_sync_result is not None:
-            market_sync_loop_manager.record_sync_result(startup_sync_result)
-        market_sync_loop_manager.start()
-        if startup_sync_result is not None and startup_sync_result.is_healthy():
             try:
-                dispatch_results = market_sync_loop_manager.dispatch_current_coverage()
-                logger.info("Initial live eligibility evaluation complete: %s", dispatch_results)
+                queue = build_market_sync_queue()
+                queue.enqueue_universe_refresh()
+                queue.enqueue_coverage_aggregate()
+                queue.close()
+                logger.info("Queued initial market sync jobs for external worker.")
             except Exception:
-                logger.exception("Initial live eligibility evaluation failed.")
+                logger.exception("Failed to queue initial market sync jobs.")
+                if settings.startup_sync_require_success:
+                    raise
+        else:
+            if settings.startup_sync_blocking:
+                with SessionLocal() as db:
+                    try:
+                        summary = run_startup_market_data_sync(db)
+                        startup_sync_result = summary.get("sync_sweep_result")
+                        logger.info("Startup market-data sync complete: %s", summary)
+                    except Exception:
+                        logger.exception("Startup market-data sync failed.")
+                        if settings.startup_sync_require_success:
+                            raise
+            if startup_sync_result is not None:
+                market_sync_loop_manager.record_sync_result(startup_sync_result)
+            market_sync_loop_manager.start()
+            if startup_sync_result is not None and startup_sync_result.is_healthy():
+                try:
+                    dispatch_results = market_sync_loop_manager.dispatch_current_coverage()
+                    logger.info("Initial live eligibility evaluation complete: %s", dispatch_results)
+                except Exception:
+                    logger.exception("Initial live eligibility evaluation failed.")
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:

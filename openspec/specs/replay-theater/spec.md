@@ -1,7 +1,8 @@
 # replay-theater Specification
 
 ## Purpose
-TBD - created by archiving change refactor-web-product-experience. Update Purpose after archive.
+Define the product-facing replay experience for browsing backtest runs, inspecting run context, and preparing symbol-scoped execution detail for deeper analysis.
+
 ## Requirements
 ### Requirement: Replay pages SHALL treat a backtest run as a multi-symbol experience
 The replay experience SHALL support backtest runs that rotate across multiple symbols and SHALL let the user inspect symbol-specific slices within the same run.

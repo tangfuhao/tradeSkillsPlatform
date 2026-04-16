@@ -48,5 +48,6 @@ stop_service() {
 }
 
 stop_service web
+stop_service worker
 stop_service api
 stop_service runner

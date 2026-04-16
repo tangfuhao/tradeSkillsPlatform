@@ -27,9 +27,13 @@ def build_market_snapshot_for_backtest(db: Session, as_of: datetime, step_index:
     return _build_strict_snapshot(db, as_of)
 
 
-def build_market_snapshot_for_live(db: Session, as_of: datetime | None = None) -> dict[str, Any]:
+def build_market_snapshot_for_live(
+    db: Session,
+    as_of: datetime | None = None,
+    allowed_market_symbols: set[str] | None = None,
+) -> dict[str, Any]:
     if as_of is not None:
-        return _build_strict_snapshot(db, as_of)
+        return _build_strict_snapshot(db, as_of, allowed_market_symbols=allowed_market_symbols)
 
     latest_open_time_ms = db.scalar(select(func.max(MarketCandle.open_time_ms)).select_from(MarketCandle))
     if latest_open_time_ms is None:
@@ -40,7 +44,7 @@ def build_market_snapshot_for_live(db: Session, as_of: datetime | None = None) -
             "error": "No historical market data is available. Import CSV data first.",
         }
     resolved_as_of = datetime.fromtimestamp(latest_open_time_ms / 1000, tz=timezone.utc)
-    return _build_strict_snapshot(db, resolved_as_of)
+    return _build_strict_snapshot(db, resolved_as_of, allowed_market_symbols=allowed_market_symbols)
 
 
 def get_strategy_state(db: Session, *, skill_id: str, scope_kind: str, scope_id: str) -> dict[str, Any]:
@@ -216,9 +220,14 @@ def resolve_market_symbol_for_gateway(db: Session, raw_symbol: Any) -> str:
     return base_symbol
 
 
-def _build_strict_snapshot(db: Session, as_of: datetime) -> dict[str, Any]:
+def _build_strict_snapshot(
+    db: Session,
+    as_of: datetime,
+    *,
+    allowed_market_symbols: set[str] | None = None,
+) -> dict[str, Any]:
     normalized_as_of = ensure_utc(as_of)
-    snapshot = build_market_snapshot(db, normalized_as_of)
+    snapshot = build_market_snapshot(db, normalized_as_of, allowed_market_symbols=allowed_market_symbols)
     snapshot["provider"] = "historical_db"
     if snapshot["market_candidates"]:
         return snapshot

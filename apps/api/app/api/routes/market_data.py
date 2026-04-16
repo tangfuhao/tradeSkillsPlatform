@@ -2,8 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.schemas import MarketCandleResponse, MarketOverviewResponse
-from app.services.market_data_store import fetch_candles, get_market_overview, list_market_symbols, normalize_timeframe
+from app.schemas import MarketCandleResponse, MarketOverviewResponse, MarketSyncStatusResponse, MarketUniverseItemResponse
+from app.services.market_data_store import (
+    fetch_candles,
+    get_market_overview,
+    get_market_sync_status,
+    list_market_symbols,
+    list_market_universe,
+    normalize_timeframe,
+)
 from app.services.utils import ms_to_datetime
 
 
@@ -13,6 +20,16 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 @router.get("/overview", response_model=MarketOverviewResponse)
 def market_overview(db: Session = Depends(get_db)) -> MarketOverviewResponse:
     return MarketOverviewResponse.model_validate(get_market_overview(db))
+
+
+@router.get("/sync-status", response_model=MarketSyncStatusResponse)
+def market_sync_status(db: Session = Depends(get_db)) -> MarketSyncStatusResponse:
+    return MarketSyncStatusResponse.model_validate(get_market_sync_status(db))
+
+
+@router.get("/universe", response_model=list[MarketUniverseItemResponse])
+def market_universe(db: Session = Depends(get_db)) -> list[MarketUniverseItemResponse]:
+    return [MarketUniverseItemResponse.model_validate(item) for item in list_market_universe(db)]
 
 
 @router.get("/symbols", response_model=list[str])

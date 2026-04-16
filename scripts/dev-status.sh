@@ -22,4 +22,5 @@ show_service() {
 
 show_service runner http://127.0.0.1:8100/healthz
 show_service api http://127.0.0.1:8000/api/v1/health
+show_service worker background
 show_service web http://127.0.0.1:5173

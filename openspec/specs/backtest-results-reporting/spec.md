@@ -1,7 +1,8 @@
 # backtest-results-reporting Specification
 
 ## Purpose
-TBD - created by archiving change build-agent-trading-skills-platform. Update Purpose after archive.
+Define the persisted outputs, summaries, traces, portfolio views, and failure metadata that make completed or interrupted backtest runs inspectable by users and product surfaces.
+
 ## Requirements
 ### Requirement: Completed backtests return a core result summary
 The platform SHALL compute and store a core summary for every completed backtest, including realized PnL, unrealized PnL at the end of the window, net PnL, total return, benchmark comparison, max drawdown, trade count, win rate, fees paid, final equity, replay step count, and execution assumptions.

@@ -36,6 +36,25 @@ class Settings(BaseSettings):
     startup_sync_target_offset_days: int = 1
     market_sync_loop_interval_seconds: float = 60.0
     live_data_freshness_seconds: float = 180.0
+    market_universe_refresh_interval_seconds: float = 300.0
+    market_sync_schedule_interval_seconds: float = 15.0
+    market_sync_cycle_symbol_limit: int = 40
+    market_sync_tier1_target_seconds: float = 60.0
+    market_sync_tier2_target_seconds: float = 180.0
+    market_sync_tier3_target_seconds: float = 900.0
+    market_sync_symbol_max_pages_per_run: int = 20
+    market_sync_symbol_time_budget_seconds: float = 20.0
+    market_sync_retry_limit: int = 3
+    market_sync_non_retryable_delay_seconds: float = 900.0
+    market_sync_lease_ttl_seconds: float = 600.0
+    market_sync_bootstrap_window_hours: int = 72
+    market_sync_tier1_symbol_count: int = 50
+    market_sync_required_coverage_ratio: float = 0.95
+    market_sync_delist_after_missed_refreshes: int = 3
+    market_sync_queue_enabled: bool = False
+    market_sync_redis_url: str = "redis://localhost:6379/0"
+    market_sync_worker_poll_seconds: float = 1.0
+    market_sync_worker_heartbeat_ttl_seconds: float = 30.0
 
     model_config = SettingsConfigDict(
         env_prefix="TRADE_SKILLS_",

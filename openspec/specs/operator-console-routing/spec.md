@@ -1,7 +1,8 @@
 # operator-console-routing Specification
 
 ## Purpose
-TBD - created by archiving change refactor-web-product-experience. Update Purpose after archive.
+Define how operator-oriented tooling remains accessible under a dedicated console route while staying reachable from the product-facing experience.
+
 ## Requirements
 ### Requirement: Operator workflows SHALL remain available under a dedicated console route
 The system SHALL preserve the current operator-focused dashboard capabilities behind a separate console route.

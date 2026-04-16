@@ -1,7 +1,8 @@
 # product-web-shell Specification
 
 ## Purpose
-TBD - created by archiving change refactor-web-product-experience. Update Purpose after archive.
+Define the shared product-facing application shell, default entry experience, and route-level presentation rules for the TradeSkills web interface.
+
 ## Requirements
 ### Requirement: Product-facing routes SHALL provide a direct experience-first entry
 The web application SHALL expose a product-facing default route that presents TradeSkills as an operational trading workbench rather than as a theatrical preview or operator console.

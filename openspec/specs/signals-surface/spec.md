@@ -1,7 +1,8 @@
 # signals-surface Specification
 
 ## Purpose
-TBD - created by archiving change expand-product-signals-and-strategy-pages. Update Purpose after archive.
+Define the product-facing signals experience for monitoring recent live outputs, relating them to active strategies, and surfacing runtime performance context.
+
 ## Requirements
 ### Requirement: Product routes SHALL provide a dedicated signals feed
 The product-facing web experience SHALL expose a signals route that organizes recent live signals around actively running strategies rather than only as a flat reverse-chronological feed.
