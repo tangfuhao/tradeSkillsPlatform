@@ -246,8 +246,6 @@ def execute_backtest_job(run_id: str) -> None:
                     )
                     decision = dict(agent_response["decision"])
                     state_patch = decision.get("state_patch") or {}
-                    if state_patch:
-                        engine.save_strategy_state(state_patch)
 
                     portfolio_after, fills, after_mark_prices = engine.apply_decision(
                         decision,
@@ -295,6 +293,8 @@ def execute_backtest_job(run_id: str) -> None:
                             mark_prices_json=after_mark_prices or before_mark_prices,
                         )
                     )
+                    if state_patch:
+                        engine.save_strategy_state(state_patch)
 
                     persisted_run = db.get(BacktestRun, run_id)
                     if persisted_run is None:

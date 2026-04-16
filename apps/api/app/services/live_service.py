@@ -194,8 +194,6 @@ def execute_live_task(task_id: str) -> dict[str, Any] | None:
             )
             decision = dict(agent_response["decision"])
             state_patch = decision.get("state_patch") or {}
-            if state_patch:
-                engine.save_strategy_state(state_patch)
             portfolio_after, fills, _ = engine.apply_decision(
                 decision,
                 trigger_time=snapshot_as_of,
@@ -224,6 +222,8 @@ def execute_live_task(task_id: str) -> dict[str, Any] | None:
                     "recovery": recovery,
                 },
             )
+            if state_patch:
+                engine.save_strategy_state(state_patch)
             db.add(signal)
             db.add(task)
             db.commit()

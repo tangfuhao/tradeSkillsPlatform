@@ -587,6 +587,69 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     service.control_run(completed_id, "resume")
 
+    def test_backtest_rolls_back_state_patch_when_execution_fails_after_agent_response(self) -> None:
+        skill = self.create_skill(title="Backtest State Rollback")
+        start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(minutes=30)
+        trigger_times = [start_time, start_time + timedelta(minutes=15)]
+        response_payload = {
+            "decision": {
+                "action": "skip",
+                "reason": "Record staged state only after a successful cycle.",
+                "state_patch": {"focus_symbol": "BTC-USDT-SWAP", "last_action": "watch"},
+            },
+            "reasoning_summary": "Prepared a state update before execution.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with (
+            patch(
+                "app.services.backtest_service.get_market_data_coverage",
+                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+            ),
+            patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
+            patch(
+                "app.services.backtest_service.build_market_snapshot_for_backtest",
+                return_value={"market_candidates": [{"symbol": "BTC-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch("app.services.backtest_service.SessionLocal", self.session_factory),
+        ):
+            with self.session_factory() as db:
+                run_id = BacktestService(db).create_run(skill.id, start_time, end_time, 10_000.0)["id"]
+
+            with (
+                patch(
+                    "app.services.backtest_service.execute_agent_run_with_recovery",
+                    return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+                ),
+                patch(
+                    "app.services.backtest_service.PortfolioEngine.apply_decision",
+                    side_effect=RuntimeError("synthetic apply failure"),
+                ),
+            ):
+                execute_backtest_job(run_id)
+
+        with self.session_factory() as db:
+            run = db.get(BacktestRun, run_id)
+            self.assertIsNotNone(run)
+            assert run is not None
+            self.assertEqual(run.status, BACKTEST_STATUS_FAILED)
+            self.assertIn("synthetic apply failure", run.error_message or "")
+            execution_state = db.scalar(
+                select(ExecutionStrategyState).where(
+                    ExecutionStrategyState.scope_kind == BACKTEST_SCOPE_KIND,
+                    ExecutionStrategyState.scope_id == run_id,
+                )
+            )
+            self.assertIsNotNone(execution_state)
+            assert execution_state is not None
+            self.assertEqual(execution_state.state_json, {})
+            self.assertEqual(
+                db.scalar(select(func.count()).select_from(RunTrace).where(RunTrace.run_id == run_id)),
+                0,
+            )
+
     def test_live_runtime_duplicate_activation_controls_signal_serialization_and_cleanup(self) -> None:
         skill = self.create_skill(title="Live Skill")
         response_payload = {
@@ -738,6 +801,55 @@ class ExecutionLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(task)
             assert task is not None
             self.assertEqual(task.status, LIVE_STATUS_ACTIVE)
+
+    def test_live_runtime_rolls_back_state_patch_when_execution_fails_after_agent_response(self) -> None:
+        skill = self.create_skill(title="Live State Rollback")
+        response_payload = {
+            "decision": {
+                "action": "skip",
+                "reason": "Only persist state after a successful live cycle.",
+                "state_patch": {"focus_symbol": "ETH-USDT-SWAP", "last_action": "watch"},
+            },
+            "reasoning_summary": "Prepared a staged state update.",
+            "tool_calls": [],
+            "provider": "mock-runner",
+        }
+
+        with self.session_factory() as db:
+            task_id = LiveTaskService(db).create_task(skill.id)["id"]
+
+        with (
+            patch("app.services.live_service.SessionLocal", self.session_factory),
+            patch(
+                "app.services.live_service.build_market_snapshot_for_live",
+                return_value={"market_candidates": [{"symbol": "ETH-USDT-SWAP"}], "provider": "mock-provider"},
+            ),
+            patch(
+                "app.services.live_service.execute_agent_run_with_recovery",
+                return_value=(response_payload, {"attempt_count": 1, "recovered": False, "retry_count": 0}),
+            ),
+            patch(
+                "app.services.live_service.PortfolioEngine.apply_decision",
+                side_effect=RuntimeError("synthetic live apply failure"),
+            ),
+        ):
+            signal = execute_live_task(task_id)
+
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal["delivery_status"], "failed")
+        self.assertIn("synthetic live apply failure", signal["signal"]["error_message"] or "")
+
+        with self.session_factory() as db:
+            execution_state = db.scalar(
+                select(ExecutionStrategyState).where(
+                    ExecutionStrategyState.scope_kind == LIVE_SCOPE_KIND,
+                    ExecutionStrategyState.scope_id == task_id,
+                )
+            )
+            self.assertIsNotNone(execution_state)
+            assert execution_state is not None
+            self.assertEqual(execution_state.state_json, {})
 
     def test_trace_serializer_preserves_legacy_execution_timing(self) -> None:
         skill = self.create_skill(title="Legacy Timing Skill")

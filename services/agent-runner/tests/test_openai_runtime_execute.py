@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from runner.schemas import ExecuteRunRequest, ExecutionTiming
-from runner.services.openai_runtime import OpenAIToolDecisionEngine, StreamRoundResult
+from runner.services.openai_runtime import OpenAIToolDecisionEngine, StreamRoundResult, ToolRuntime
 
 
 def _request() -> ExecuteRunRequest:
@@ -22,6 +22,24 @@ def _request() -> ExecuteRunRequest:
 
 
 class OpenAIRuntimeExecuteTests(unittest.TestCase):
+    def test_save_strategy_state_only_stages_patch_locally(self) -> None:
+        runtime = ToolRuntime(_request())
+        runtime.gateway_client = MagicMock()
+        runtime.gateway_client.execute.return_value = {
+            "status": "ok",
+            "content": {"strategy_state": {"existing_flag": True}},
+        }
+
+        result = runtime.execute_tool("save_strategy_state", {"patch": {"focus_symbol": "BTC-USDT-SWAP"}})
+
+        self.assertEqual(result["status"], "staged")
+        self.assertEqual(
+            result["content"]["strategy_state"],
+            {"existing_flag": True, "focus_symbol": "BTC-USDT-SWAP"},
+        )
+        self.assertEqual(result["content"]["pending_state_patch"], {"focus_symbol": "BTC-USDT-SWAP"})
+        runtime.gateway_client.execute.assert_called_once_with("get_strategy_state", {})
+
     def test_execute_records_round_and_tool_timing(self) -> None:
         rounds = [
             StreamRoundResult(
