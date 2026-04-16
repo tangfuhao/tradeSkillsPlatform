@@ -209,11 +209,11 @@ class ToolRuntime:
         if not isinstance(patch, dict):
             return {"status": "error", "content": {"error": "patch must be an object"}}
         self.pending_state_patch.update(patch)
-        response = self.gateway_client.execute("save_strategy_state", {"patch": dict(self.pending_state_patch)})
+        preview = self._get_strategy_state()
         return {
-            "status": response.get("status", "staged"),
+            "status": "staged",
             "content": {
-                "strategy_state": (response.get("content") or {}).get("strategy_state", {}),
+                "strategy_state": (preview.get("content") or {}).get("strategy_state", {}),
                 "pending_state_patch": dict(self.pending_state_patch),
             },
         }
