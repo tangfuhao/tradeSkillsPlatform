@@ -51,3 +51,4 @@ stop_service web
 stop_service worker
 stop_service api
 stop_service runner
+stop_service redis

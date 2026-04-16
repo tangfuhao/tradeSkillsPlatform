@@ -14,8 +14,6 @@ REDIS_PORT=6379
 API_HEALTH_URL="http://127.0.0.1:${API_PORT}/api/v1/health"
 RUNNER_HEALTH_URL="http://127.0.0.1:${RUNNER_PORT}/healthz"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}"
-WORKER_LOG_NAME="market-sync-worker"
-
 started_services=()
 
 log() {
@@ -84,18 +82,6 @@ ensure_port_available() {
   exit 1
 }
 
-require_port_in_use() {
-  local name="$1"
-  local port="$2"
-  local existing_pid
-  existing_pid="$(listening_pid "$port")"
-  if [[ -n "$existing_pid" ]]; then
-    return 0
-  fi
-  log "$name is required but no process is listening on port $port"
-  exit 1
-}
-
 wait_for_http() {
   local name="$1"
   local url="$2"
@@ -120,6 +106,36 @@ wait_for_http() {
   done
 
   log "$name did not become ready within ${timeout_seconds}s"
+  if [[ -f "$log_file" ]]; then
+    tail -n 40 "$log_file" || true
+  fi
+  exit 1
+}
+
+wait_for_port() {
+  local name="$1"
+  local port="$2"
+  local pid="$3"
+  local timeout_seconds="$4"
+  local log_file="$5"
+  local elapsed=0
+
+  while (( elapsed < timeout_seconds )); do
+    if [[ -n "$(listening_pid "$port")" ]]; then
+      return 0
+    fi
+    if ! pid_is_running "$pid"; then
+      log "$name exited before becoming ready"
+      if [[ -f "$log_file" ]]; then
+        tail -n 40 "$log_file" || true
+      fi
+      exit 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  log "$name did not start listening on port $port within ${timeout_seconds}s"
   if [[ -f "$log_file" ]]; then
     tail -n 40 "$log_file" || true
   fi
@@ -214,6 +230,41 @@ start_background_service() {
   log "$name running with pid $pid"
 }
 
+start_port_service() {
+  local name="$1"
+  local cwd="$2"
+  local port="$3"
+  local timeout_seconds="$4"
+  shift 4
+
+  local pid_file log_file pid
+  pid_file="$(pid_file_for "$name")"
+  log_file="$(log_file_for "$name")"
+
+  if [[ -f "$pid_file" ]]; then
+    pid="$(cat "$pid_file")"
+    if pid_is_running "$pid" && [[ -n "$(listening_pid "$port")" ]]; then
+      log "$name already running with pid $pid"
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+
+  ensure_port_available "$name" "$port"
+
+  log "starting $name"
+  (
+    cd "$cwd"
+    nohup "$@" >"$log_file" 2>&1 < /dev/null &
+    echo $! >"$pid_file"
+  )
+
+  pid="$(cat "$pid_file")"
+  started_services+=("$name")
+  wait_for_port "$name" "$port" "$pid" "$timeout_seconds" "$log_file"
+  log "$name ready on port $port"
+}
+
 require_cmd curl
 require_cmd lsof
 require_cmd npm
@@ -224,7 +275,20 @@ require_file "$ROOT/apps/api/.env"
 require_file "$ROOT/services/agent-runner/.env"
 require_file "$ROOT/apps/web/.env.local"
 require_file "$ROOT/apps/web/package.json"
-require_port_in_use redis "$REDIS_PORT"
+
+if [[ -n "$(listening_pid "$REDIS_PORT")" ]]; then
+  log "redis already available on port $REDIS_PORT"
+elif command -v redis-server >/dev/null 2>&1; then
+  start_port_service \
+    redis \
+    "$ROOT" \
+    "$REDIS_PORT" \
+    15 \
+    redis-server --save "" --appendonly no --port "$REDIS_PORT"
+else
+  log "redis is required but nothing is listening on port $REDIS_PORT and redis-server is not installed"
+  exit 1
+fi
 
 log "bootstrapping local environments and dependencies"
 "$ROOT/scripts/bootstrap-dev.sh"

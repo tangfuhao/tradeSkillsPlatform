@@ -224,7 +224,8 @@ This will:
 - install or refresh Python dependencies when either requirements file changes
 - install or refresh web dependencies when `package.json` or `package-lock.json` changes
 - read `apps/api/.env`, `services/agent-runner/.env`, and `apps/web/.env.local`
-- start all three services in the background
+- reuse an existing Redis on `127.0.0.1:6379`, or start a local `redis-server` automatically when that port is free
+- start the web, API, runner, and market-sync worker in the background
 - write PID files under `.dev/pids`
 - write logs under `.dev/logs`
 
