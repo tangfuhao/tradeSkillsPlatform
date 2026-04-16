@@ -15,6 +15,7 @@ from app.models import (
     ExecutionStrategyState,
     LiveSignal,
     LiveTask,
+    MarketCandle,
     PortfolioBook,
     PortfolioFill,
     RunTrace,
@@ -93,6 +94,31 @@ class ExecutionLifecycleTests(unittest.TestCase):
                 query = query.where(*criteria)
             return int(db.scalar(query) or 0)
 
+    def seed_candle(self, *, open_time: datetime, market_symbol: str = "BTC-USDT-SWAP", source: str = "csv") -> None:
+        with self.session_factory() as db:
+            db.add(
+                MarketCandle(
+                    exchange="okx",
+                    market_symbol=market_symbol,
+                    base_symbol=market_symbol,
+                    quote_asset="USDT",
+                    instrument_type="SWAP",
+                    timeframe="1m",
+                    open_time_ms=int(open_time.timestamp() * 1000),
+                    open=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.5,
+                    vol=1.0,
+                    vol_ccy=1.0,
+                    vol_quote=100.5,
+                    confirm=True,
+                    is_old_contract=False,
+                    source=source,
+                )
+            )
+            db.commit()
+
     def test_backtest_checkpoint_pause_resume_and_delete_cleanup(self) -> None:
         skill = self.create_skill(title="Backtest Skill")
         start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -146,8 +172,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(
@@ -250,6 +276,26 @@ class ExecutionLifecycleTests(unittest.TestCase):
             0,
         )
 
+    def test_backtest_rejects_window_that_crosses_a_local_data_gap(self) -> None:
+        skill = self.create_skill(title="Gap Check Skill")
+        for minute in range(4):
+            self.seed_candle(open_time=datetime(2023, 7, 1, 0, minute, tzinfo=timezone.utc))
+        for minute in range(4):
+            self.seed_candle(
+                open_time=datetime(2026, 4, 16, 0, minute, tzinfo=timezone.utc),
+                market_symbol="DOGE-USDT-SWAP",
+                source="okx_history_api",
+            )
+
+        with self.session_factory() as db:
+            with self.assertRaisesRegex(ValueError, "outside local historical coverage segments"):
+                BacktestService(db).create_run(
+                    skill.id,
+                    datetime(2023, 7, 1, 0, 0, tzinfo=timezone.utc),
+                    datetime(2026, 4, 16, 0, 3, tzinfo=timezone.utc),
+                    10_000.0,
+                )
+
     def test_backtest_records_recovery_metadata_when_runner_recovers(self) -> None:
         skill = self.create_skill(title="Recovering Backtest Skill")
         start_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -264,8 +310,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(
@@ -324,8 +370,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(
@@ -403,8 +449,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(
@@ -492,8 +538,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(
@@ -563,8 +609,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
         ):
@@ -614,8 +660,8 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage",
-                return_value=(start_time - timedelta(days=1), end_time + timedelta(days=1)),
+                "app.services.backtest_service.get_market_data_coverage_ranges",
+                return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
             patch(

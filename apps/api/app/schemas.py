@@ -157,6 +157,7 @@ class MarketOverviewResponse(BaseModel):
     total_symbols: int
     coverage_start_ms: int | None
     coverage_end_ms: int | None
+    coverage_ranges: list[dict[str, int]] = Field(default_factory=list)
     recent_csv_jobs: list[dict[str, Any]]
     sync_cursors: list[dict[str, Any]]
     tier1_freshness_ms_p95: int | None = None

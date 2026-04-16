@@ -21,7 +21,7 @@ from app.services.execution_lifecycle import (
     BACKTEST_STATUS_STOPPED,
     BACKTEST_STATUS_STOPPING,
 )
-from app.services.market_data_store import get_market_data_coverage
+from app.services.market_data_store import get_market_data_coverage_ranges
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import TRACE_RUNTIME_METRICS_KEY, backtest_to_dict, trace_to_dict
 from app.services.utils import datetime_to_ms, ensure_utc, new_id, utc_now
@@ -415,15 +415,29 @@ def _validate_backtest_window(db: Session, start_time: datetime, end_time: datet
     if end_time <= start_time:
         raise ValueError("end_time must be later than start_time")
 
-    coverage_start, coverage_end = get_market_data_coverage(db)
-    if coverage_start is None or coverage_end is None:
+    coverage_ranges = get_market_data_coverage_ranges(db)
+    if not coverage_ranges:
         raise ValueError("No local historical market data is available. Import CSV data before creating a backtest.")
 
-    if start_time < coverage_start or end_time > coverage_end:
+    matching_range = next(
+        (
+            (coverage_start, coverage_end)
+            for coverage_start, coverage_end in coverage_ranges
+            if start_time >= coverage_start and end_time <= coverage_end
+        ),
+        None,
+    )
+    if matching_range is None:
+        available_ranges = "; ".join(
+            f"{coverage_start.isoformat()} -> {coverage_end.isoformat()}"
+            for coverage_start, coverage_end in coverage_ranges[:3]
+        )
+        if len(coverage_ranges) > 3:
+            available_ranges += "; ..."
         raise ValueError(
             "Requested window "
             f"{start_time.isoformat()} -> {end_time.isoformat()} is outside local historical coverage "
-            f"{coverage_start.isoformat()} -> {coverage_end.isoformat()}."
+            f"segments: {available_ranges}."
         )
 
     trigger_times, truncated = build_trigger_times(start_time, end_time, cadence)

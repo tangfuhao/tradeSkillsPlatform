@@ -10,6 +10,26 @@ type BacktestWindowMs = {
   endTimeMs: number;
 };
 
+function getCoverageRangesMs(overview: MarketOverview | null): BacktestWindowMs[] {
+  const ranges =
+    overview?.coverage_ranges
+      ?.filter((range) => Number.isFinite(range.start_ms) && Number.isFinite(range.end_ms) && range.end_ms > range.start_ms)
+      .map((range) => ({
+        startTimeMs: range.start_ms,
+        endTimeMs: range.end_ms,
+      })) ?? [];
+
+  if (ranges.length) return ranges;
+  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return [];
+  if (overview.coverage_end_ms <= overview.coverage_start_ms) return [];
+  return [
+    {
+      startTimeMs: overview.coverage_start_ms,
+      endTimeMs: overview.coverage_end_ms,
+    },
+  ];
+}
+
 type ResolveBacktestLaunchParams = {
   overview: MarketOverview | null;
   startInput: string;
@@ -33,12 +53,15 @@ type ResolvedBacktestLaunch =
     };
 
 export function getHistoricalCoverageWindowMs(overview: MarketOverview | null): BacktestWindowMs | null {
-  if (overview?.coverage_start_ms == null || overview?.coverage_end_ms == null) return null;
-  if (overview.coverage_end_ms <= overview.coverage_start_ms) return null;
-  return {
-    startTimeMs: overview.coverage_start_ms,
-    endTimeMs: overview.coverage_end_ms,
-  };
+  const ranges = getCoverageRangesMs(overview);
+  if (!ranges.length) return null;
+  return ranges.reduce((best, current) => {
+    const bestSpan = best.endTimeMs - best.startTimeMs;
+    const currentSpan = current.endTimeMs - current.startTimeMs;
+    if (currentSpan > bestSpan) return current;
+    if (currentSpan === bestSpan && current.endTimeMs > best.endTimeMs) return current;
+    return best;
+  });
 }
 
 export function getHistoricalCoverageWindow(
@@ -128,10 +151,12 @@ export function resolveBacktestLaunchRequest({
       error: '初始资金必须是大于 0 的数字。',
     };
   }
-  if (startTimeMs < coverage.startTimeMs || endTimeMs > coverage.endTimeMs) {
+  const coverageRanges = getCoverageRangesMs(overview);
+  const withinCoverage = coverageRanges.some((range) => startTimeMs >= range.startTimeMs && endTimeMs <= range.endTimeMs);
+  if (!withinCoverage) {
     return {
       payload: null,
-      error: '所选回放时间必须落在当前本地历史覆盖范围内。',
+      error: '所选回放时间必须完整落在某个连续的本地历史覆盖区间内。',
     };
   }
 

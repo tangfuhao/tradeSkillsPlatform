@@ -189,14 +189,47 @@ def build_market_snapshot(
     }
 
 
+def get_market_data_coverage_ranges(
+    db: Session,
+    *,
+    timeframe: str | None = None,
+) -> list[tuple[datetime, datetime]]:
+    effective_timeframe = timeframe or settings.historical_base_timeframe
+    gap_threshold_ms = timeframe_to_ms(effective_timeframe)
+    open_times = db.scalars(
+        select(MarketCandle.open_time_ms)
+        .where(MarketCandle.timeframe == effective_timeframe)
+        .distinct()
+        .order_by(MarketCandle.open_time_ms.asc())
+    ).all()
+    if not open_times:
+        return []
+
+    coverage_ranges_ms: list[tuple[int, int]] = []
+    range_start_ms = open_times[0]
+    previous_ms = open_times[0]
+
+    for current_ms in open_times[1:]:
+        if current_ms - previous_ms > gap_threshold_ms:
+            coverage_ranges_ms.append((range_start_ms, previous_ms))
+            range_start_ms = current_ms
+        previous_ms = current_ms
+
+    coverage_ranges_ms.append((range_start_ms, previous_ms))
+    return [(ms_to_datetime(start_ms), ms_to_datetime(end_ms)) for start_ms, end_ms in coverage_ranges_ms]
+
+
 def get_market_data_coverage(db: Session) -> tuple[datetime | None, datetime | None]:
-    min_max = db.execute(
-        select(func.min(MarketCandle.open_time_ms), func.max(MarketCandle.open_time_ms))
-    ).one()
-    start_ms, end_ms = min_max
-    return (
-        ms_to_datetime(start_ms) if start_ms is not None else None,
-        ms_to_datetime(end_ms) if end_ms is not None else None,
+    coverage_ranges = get_market_data_coverage_ranges(db)
+    if not coverage_ranges:
+        return None, None
+
+    return max(
+        coverage_ranges,
+        key=lambda item: (
+            datetime_to_ms(item[1]) - datetime_to_ms(item[0]),
+            datetime_to_ms(item[1]),
+        ),
     )
 
 
@@ -209,6 +242,7 @@ def get_market_overview(db: Session) -> dict[str, Any]:
 
     total_candles = db.scalar(select(func.count()).select_from(MarketCandle)) or 0
     total_symbols = db.scalar(select(func.count(func.distinct(MarketCandle.market_symbol))).select_from(MarketCandle)) or 0
+    coverage_ranges = get_market_data_coverage_ranges(db)
     coverage_start, coverage_end = get_market_data_coverage(db)
     jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.started_at.desc()).limit(10)).all()
     sync_states = db.scalars(select(MarketSyncState).order_by(MarketSyncState.base_symbol.asc())).all()
@@ -223,6 +257,13 @@ def get_market_overview(db: Session) -> dict[str, Any]:
         "total_symbols": total_symbols,
         "coverage_start_ms": datetime_to_ms(coverage_start) if coverage_start else None,
         "coverage_end_ms": datetime_to_ms(coverage_end) if coverage_end else None,
+        "coverage_ranges": [
+            {
+                "start_ms": datetime_to_ms(range_start),
+                "end_ms": datetime_to_ms(range_end),
+            }
+            for range_start, range_end in coverage_ranges
+        ],
         "recent_csv_jobs": [
             {
                 "id": job.id,

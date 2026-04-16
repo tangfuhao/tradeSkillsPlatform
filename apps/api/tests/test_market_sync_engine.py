@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
-from app.models import MarketInstrument, MarketSyncState
+from app.models import MarketCandle, MarketInstrument, MarketSyncState
 from app.runtime.market_sync_loop import MarketSyncLoopManager
 from app.services.market_data_store import get_market_overview, get_market_sync_status, list_market_universe
 from app.services.market_data_sync import get_fresh_market_symbols_for_dispatch, recompute_market_coverage_snapshot
@@ -71,6 +71,30 @@ class MarketSyncEngineTests(unittest.TestCase):
             notes_json=notes or {},
         )
         db.add_all([instrument, state])
+
+    def _seed_candle(self, db, *, open_time: datetime, market_symbol: str = "BTC-USDT-SWAP", source: str = "csv") -> None:
+        open_time_ms = datetime_to_ms(open_time)
+        db.add(
+            MarketCandle(
+                exchange="okx",
+                market_symbol=market_symbol,
+                base_symbol=market_symbol,
+                quote_asset="USDT",
+                instrument_type="SWAP",
+                timeframe="1m",
+                open_time_ms=open_time_ms,
+                open=100.0,
+                high=101.0,
+                low=99.0,
+                close=100.5,
+                vol=1.0,
+                vol_ccy=1.0,
+                vol_quote=100.5,
+                confirm=True,
+                is_old_contract=False,
+                source=source,
+            )
+        )
 
     def test_coverage_snapshot_allows_degraded_dispatch_when_tier1_complete(self) -> None:
         dispatch_ms = int(datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -190,6 +214,42 @@ class MarketSyncEngineTests(unittest.TestCase):
         self.assertEqual(snapshot.last_successful_coverage_end_ms, 30)
         self.assertEqual(snapshot.universe_active_count, 100)
         self.assertTrue(snapshot.degraded)
+
+    def test_market_overview_uses_contiguous_coverage_ranges(self) -> None:
+        with self.session_factory() as db:
+            for minute in range(6):
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2023, 7, 1, 0, minute, tzinfo=timezone.utc),
+                )
+            for minute in range(3):
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2026, 4, 16, 0, minute, tzinfo=timezone.utc),
+                    market_symbol="DOGE-USDT-SWAP",
+                    source="okx_history_api",
+                )
+            db.commit()
+
+            overview = get_market_overview(db)
+
+        self.assertEqual(len(overview["coverage_ranges"]), 2)
+        self.assertEqual(
+            overview["coverage_ranges"][0],
+            {
+                "start_ms": datetime_to_ms(datetime(2023, 7, 1, 0, 0, tzinfo=timezone.utc)),
+                "end_ms": datetime_to_ms(datetime(2023, 7, 1, 0, 5, tzinfo=timezone.utc)),
+            },
+        )
+        self.assertEqual(
+            overview["coverage_ranges"][1],
+            {
+                "start_ms": datetime_to_ms(datetime(2026, 4, 16, 0, 0, tzinfo=timezone.utc)),
+                "end_ms": datetime_to_ms(datetime(2026, 4, 16, 0, 2, tzinfo=timezone.utc)),
+            },
+        )
+        self.assertEqual(overview["coverage_start_ms"], overview["coverage_ranges"][0]["start_ms"])
+        self.assertEqual(overview["coverage_end_ms"], overview["coverage_ranges"][0]["end_ms"])
 
 
 if __name__ == "__main__":

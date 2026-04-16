@@ -264,6 +264,11 @@ export type MarketSyncCursor = {
   notes: Record<string, unknown>;
 };
 
+export type MarketCoverageRange = {
+  start_ms: number;
+  end_ms: number;
+};
+
 export type MarketOverview = {
   historical_data_dir: string;
   base_timeframe: string;
@@ -271,6 +276,7 @@ export type MarketOverview = {
   total_symbols: number;
   coverage_start_ms: number | null;
   coverage_end_ms: number | null;
+  coverage_ranges: MarketCoverageRange[];
   recent_csv_jobs: CsvIngestionJob[];
   sync_cursors: MarketSyncCursor[];
 };
