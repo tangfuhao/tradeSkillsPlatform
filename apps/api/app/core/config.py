@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     market_candle_partition_months_back: int = 24
     market_candle_partition_months_ahead: int = 3
     market_candle_hot_retention_months: int = 36
+    market_overview_cache_ttl_seconds: float = 10.0
+    market_overview_rebuild_dedupe_seconds: float = 10.0
+    market_overview_max_staleness_seconds: float = 60.0
 
     model_config = SettingsConfigDict(
         env_prefix="TRADE_SKILLS_",

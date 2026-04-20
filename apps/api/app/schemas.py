@@ -236,7 +236,7 @@ class MarketOverviewResponse(BaseModel):
     coverage_ranges: list[dict[str, int]] = Field(default_factory=list)
     recent_csv_jobs: list[CsvIngestionJobResponse]
     ingest_backlog: CsvIngestionBacklogResponse
-    sync_cursors: list[dict[str, Any]]
+    sync_cursor_counts: dict[str, int] = Field(default_factory=dict)
     tier1_freshness_ms_p95: int | None = None
     tier2_freshness_ms_p95: int | None = None
     bootstrap_pending_count: int = 0

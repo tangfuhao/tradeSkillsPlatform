@@ -25,7 +25,7 @@ from app.services.execution_lifecycle import (
     BACKTEST_STATUS_STOPPED,
     BACKTEST_STATUS_STOPPING,
 )
-from app.services.market_data_store import get_market_data_coverage_ranges
+from app.services.market_data_store import get_market_overview_coverage_ranges
 from app.services.portfolio_engine import BACKTEST_SCOPE_KIND, PortfolioEngine
 from app.services.serializers import TRACE_RUNTIME_METRICS_KEY, backtest_to_dict, trace_to_dict
 from app.services.utils import datetime_to_ms, ensure_utc, new_id, utc_now
@@ -521,7 +521,7 @@ def _validate_backtest_window(db: Session, start_time: datetime, end_time: datet
     if end_time <= start_time:
         raise ValueError("end_time must be later than start_time")
 
-    coverage_ranges = get_market_data_coverage_ranges(db)
+    coverage_ranges = get_market_overview_coverage_ranges(db)
     if not coverage_ranges:
         raise ValueError("No local historical market data is available. Import CSV data before creating a backtest.")
 

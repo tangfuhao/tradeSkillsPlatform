@@ -22,7 +22,10 @@ from app.services.market_data_store import (
     fetch_candles,
     get_market_overview,
     get_market_sync_status,
+    invalidate_market_overview_cache,
     list_market_universe,
+    recompute_market_overview_state,
+    update_market_overview_state_for_open_times,
 )
 from app.services.market_data_sync import (
     discover_local_csv_ingestion_jobs,
@@ -44,8 +47,10 @@ class MarketSyncEngineTests(unittest.TestCase):
         )
         self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, future=True)
         Base.metadata.create_all(self.engine)
+        invalidate_market_overview_cache()
 
     def tearDown(self) -> None:
+        invalidate_market_overview_cache()
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
@@ -208,6 +213,9 @@ class MarketSyncEngineTests(unittest.TestCase):
         self.assertIn("latest_coverage_snapshot", overview)
         self.assertEqual(overview["bootstrap_pending_count"], 1)
         self.assertEqual(overview["backfill_lag_symbol_count"], 1)
+        self.assertEqual(overview["sync_cursor_counts"]["total"], 2)
+        self.assertEqual(overview["sync_cursor_counts"]["failed"], 0)
+        self.assertEqual(overview["sync_cursor_counts"]["skipped"], 0)
         self.assertEqual(len(universe), 2)
         self.assertTrue(any(item["sync_state"] for item in universe))
 
@@ -283,6 +291,87 @@ class MarketSyncEngineTests(unittest.TestCase):
         )
         self.assertEqual(overview["coverage_start_ms"], overview["coverage_ranges"][0]["start_ms"])
         self.assertEqual(overview["coverage_end_ms"], overview["coverage_ranges"][0]["end_ms"])
+
+    def test_market_overview_state_merges_bridged_ranges_incrementally(self) -> None:
+        with self.session_factory() as db:
+            for minute in (0, 1, 4, 5):
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2024, 1, 1, 0, minute, tzinfo=timezone.utc),
+                )
+            db.commit()
+            recompute_market_overview_state(db, force=True, force_coverage_bootstrap=True)
+
+            for minute in (2, 3):
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2024, 1, 1, 0, minute, tzinfo=timezone.utc),
+                )
+            db.commit()
+            update_market_overview_state_for_open_times(
+                db,
+                [
+                    datetime_to_ms(datetime(2024, 1, 1, 0, 3, tzinfo=timezone.utc)),
+                    datetime_to_ms(datetime(2024, 1, 1, 0, 2, tzinfo=timezone.utc)),
+                ],
+                force_rebuild=True,
+            )
+            overview = get_market_overview(db)
+
+        self.assertEqual(
+            overview["coverage_ranges"],
+            [
+                {
+                    "start_ms": datetime_to_ms(datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)),
+                    "end_ms": datetime_to_ms(datetime(2024, 1, 1, 0, 5, tzinfo=timezone.utc)),
+                }
+            ],
+        )
+        self.assertEqual(overview["coverage_start_ms"], overview["coverage_ranges"][0]["start_ms"])
+        self.assertEqual(overview["coverage_end_ms"], overview["coverage_ranges"][0]["end_ms"])
+
+    def test_market_overview_reads_precomputed_state_without_rescanning_candles(self) -> None:
+        snapshot = {
+            "id": "covsnap_test",
+            "active_symbol_count": 1,
+            "fresh_symbol_count": 1,
+            "tier1_symbol_count": 1,
+            "tier1_fresh_symbol_count": 1,
+            "coverage_ratio": 1.0,
+            "dispatch_as_of_ms": datetime_to_ms(datetime(2024, 1, 1, 0, 2, tzinfo=timezone.utc)),
+            "degraded": False,
+            "blocked_reason": None,
+            "missing_symbol_count": 0,
+            "missing_symbols_sample": [],
+            "universe_version": 1,
+            "created_at_ms": datetime_to_ms(datetime(2024, 1, 1, 0, 3, tzinfo=timezone.utc)),
+        }
+        with self.session_factory() as db:
+            self._seed_symbol(
+                db,
+                symbol="BTC-USDT-SWAP",
+                priority_tier="tier1",
+                fresh_coverage_end_ms=snapshot["dispatch_as_of_ms"],
+                last_sync_completed_at=datetime(2024, 1, 1, 0, 3, tzinfo=timezone.utc),
+            )
+            for minute in range(3):
+                self._seed_candle(
+                    db,
+                    open_time=datetime(2024, 1, 1, 0, minute, tzinfo=timezone.utc),
+                )
+            db.commit()
+            recompute_market_overview_state(db, force=True, force_coverage_bootstrap=True, latest_snapshot=snapshot)
+            invalidate_market_overview_cache()
+
+            with (
+                patch("app.services.market_data_store.get_market_data_coverage_ranges", side_effect=AssertionError("unexpected candle rescan")),
+                patch("app.services.market_data_sync.get_latest_market_coverage_snapshot", return_value=snapshot) as latest_snapshot_mock,
+            ):
+                overview = get_market_overview(db)
+
+        self.assertEqual(latest_snapshot_mock.call_count, 1)
+        self.assertEqual(len(overview["coverage_ranges"]), 1)
+        self.assertEqual(overview["coverage_end_ms"], snapshot["dispatch_as_of_ms"])
 
     def test_fetch_candles_aggregated_timeframe_matches_python_parity(self) -> None:
         end_time = datetime(2024, 1, 1, 12, 19, tzinfo=timezone.utc)

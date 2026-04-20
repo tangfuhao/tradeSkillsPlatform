@@ -330,8 +330,8 @@ export default function ConsolePage() {
   );
 
   const latestCsvJob = marketOverview?.recent_csv_jobs?.[0] ?? null;
-  const skippedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'skipped').length ?? 0;
-  const failedSyncCount = marketOverview?.sync_cursors.filter((cursor) => cursor.status === 'failed').length ?? 0;
+  const skippedSyncCount = marketOverview?.sync_cursor_counts?.skipped ?? 0;
+  const failedSyncCount = marketOverview?.sync_cursor_counts?.failed ?? 0;
   const traceAutoRefresh = isBacktestActive(selectedBacktest?.status);
   const hasHistoricalCoverage = marketOverview?.coverage_start_ms != null && marketOverview?.coverage_end_ms != null;
 

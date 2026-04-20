@@ -339,6 +339,12 @@ export type MarketCoverageRange = {
   end_ms: number;
 };
 
+export type MarketSyncCursorCounts = {
+  total: number;
+  failed: number;
+  skipped: number;
+};
+
 export type MarketOverview = {
   historical_data_dir: string;
   base_timeframe: string;
@@ -349,7 +355,7 @@ export type MarketOverview = {
   coverage_ranges: MarketCoverageRange[];
   recent_csv_jobs: CsvIngestionJob[];
   ingest_backlog?: CsvIngestionBacklog;
-  sync_cursors: MarketSyncCursor[];
+  sync_cursor_counts: MarketSyncCursorCounts;
   tier1_freshness_ms_p95?: number | null;
   tier2_freshness_ms_p95?: number | null;
   bootstrap_pending_count?: number;

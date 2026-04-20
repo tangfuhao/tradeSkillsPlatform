@@ -1,25 +1,35 @@
 from __future__ import annotations
 
+import copy
+import threading
+import time
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, desc, func, literal, select
+from sqlalchemy import case, desc, func, literal, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models import CsvIngestionJob, MarketCandle, MarketInstrument, MarketSyncState
-from app.services.utils import datetime_to_ms, ms_to_datetime, utc_now
+from app.models import CsvIngestionJob, MarketCandle, MarketInstrument, MarketOverviewState, MarketSyncState
+from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
+
+_OVERVIEW_CACHE_LOCK = threading.Lock()
+_OVERVIEW_REFRESH_LOCK = threading.Lock()
+_OVERVIEW_CACHE_PAYLOAD: dict[str, Any] | None = None
+_OVERVIEW_CACHE_AT_MONOTONIC = 0.0
 
 
 def normalize_timeframe(value: str) -> str:
-    text = value.strip()
-    if not text:
+    text_value = value.strip()
+    if not text_value:
         raise ValueError("timeframe is required")
-    suffix = text[-1].lower()
-    amount = int(text[:-1])
+    suffix = text_value[-1].lower()
+    amount = int(text_value[:-1])
     if suffix not in {"m", "h", "d"} or amount <= 0:
         raise ValueError(f"Unsupported timeframe: {value}")
     return f"{amount}{suffix}"
+
 
 
 def timeframe_to_ms(value: str) -> int:
@@ -35,16 +45,20 @@ def timeframe_to_ms(value: str) -> int:
     raise ValueError(f"Unsupported timeframe: {value}")
 
 
+
 def parse_base_symbol(market_symbol: str) -> str:
     return market_symbol.split("#OLD#")[0]
+
 
 
 def is_usdt_swap_symbol(market_symbol: str) -> bool:
     return parse_base_symbol(market_symbol).endswith("-USDT-SWAP")
 
 
+
 def bucket_open_time_ms(open_time_ms: int, timeframe_ms: int) -> int:
     return (open_time_ms // timeframe_ms) * timeframe_ms
+
 
 
 def fetch_candles(
@@ -136,6 +150,7 @@ def fetch_candles(
     return [_serialize_aggregated_candle_row(row) for row in reversed(aggregated_rows)]
 
 
+
 def aggregate_rows(rows: list[MarketCandle], timeframe: str) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -170,6 +185,7 @@ def aggregate_rows(rows: list[MarketCandle], timeframe: str) -> list[dict[str, A
     return [buckets[key] for key in sorted(buckets)]
 
 
+
 def serialize_candle(row: MarketCandle) -> dict[str, Any]:
     return {
         "market_symbol": row.market_symbol,
@@ -186,6 +202,7 @@ def serialize_candle(row: MarketCandle) -> dict[str, Any]:
         "confirm": row.confirm,
         "source": row.source,
     }
+
 
 
 def build_market_snapshot(
@@ -271,13 +288,17 @@ def build_market_snapshot(
             "as_of_ms": int(row.as_of_ms),
         }
         for row in selected_rows
-        if row.first_open not in {None, 0} and row.last_price is not None and row.volume_24h_usd is not None and row.as_of_ms is not None
+        if row.first_open not in {None, 0}
+        and row.last_price is not None
+        and row.volume_24h_usd is not None
+        and row.as_of_ms is not None
     ]
     return {
         "market_candidates": candidates,
         "source": "historical_db",
         "as_of_ms": as_of_ms,
     }
+
 
 
 def get_market_data_coverage_ranges(
@@ -296,7 +317,9 @@ def get_market_data_coverage_ranges(
     )
     ordered_open_times = select(
         distinct_open_times.c.open_time_ms.label("open_time_ms"),
-        func.lag(distinct_open_times.c.open_time_ms).over(order_by=distinct_open_times.c.open_time_ms.asc()).label("previous_open_time_ms"),
+        func.lag(distinct_open_times.c.open_time_ms)
+        .over(order_by=distinct_open_times.c.open_time_ms.asc())
+        .label("previous_open_time_ms"),
     ).subquery()
     range_break_expr = case(
         (ordered_open_times.c.previous_open_time_ms.is_(None), 0),
@@ -320,8 +343,28 @@ def get_market_data_coverage_ranges(
     return [(ms_to_datetime(row.start_ms), ms_to_datetime(row.end_ms)) for row in range_rows]
 
 
+
+def get_market_overview_coverage_ranges(
+    db: Session,
+    *,
+    timeframe: str | None = None,
+) -> list[tuple[datetime, datetime]]:
+    effective_timeframe = timeframe or settings.historical_base_timeframe
+    state = _load_market_overview_state(db, effective_timeframe)
+    if state is None or not (state.coverage_ranges_json or []):
+        state_payload = recompute_market_overview_state(
+            db,
+            timeframe=effective_timeframe,
+            force=True,
+            force_coverage_bootstrap=True,
+        )
+        return _range_payload_to_datetimes(state_payload.get("coverage_ranges") or [])
+    return _range_payload_to_datetimes(state.coverage_ranges_json or [])
+
+
+
 def get_market_data_coverage(db: Session) -> tuple[datetime | None, datetime | None]:
-    coverage_ranges = get_market_data_coverage_ranges(db)
+    coverage_ranges = get_market_overview_coverage_ranges(db)
     if not coverage_ranges:
         return None, None
 
@@ -334,67 +377,168 @@ def get_market_data_coverage(db: Session) -> tuple[datetime | None, datetime | N
     )
 
 
+
 def has_market_data(db: Session) -> bool:
     return db.scalar(select(func.count()).select_from(MarketCandle)) > 0
 
 
-def get_market_overview(db: Session) -> dict[str, Any]:
+
+def invalidate_market_overview_cache() -> None:
+    global _OVERVIEW_CACHE_AT_MONOTONIC, _OVERVIEW_CACHE_PAYLOAD
+    with _OVERVIEW_CACHE_LOCK:
+        _OVERVIEW_CACHE_PAYLOAD = None
+        _OVERVIEW_CACHE_AT_MONOTONIC = 0.0
+
+
+
+def update_market_overview_state_for_open_times(
+    db: Session,
+    open_times_ms: Sequence[int],
+    *,
+    timeframe: str | None = None,
+    force_rebuild: bool = False,
+) -> dict[str, Any] | None:
+    effective_timeframe = timeframe or settings.historical_base_timeframe
+    unique_times = sorted({int(item) for item in open_times_ms})
+    state = _load_market_overview_state(db, effective_timeframe)
+    if state is None:
+        if unique_times:
+            return recompute_market_overview_state(
+                db,
+                timeframe=effective_timeframe,
+                force=True,
+                force_coverage_bootstrap=True,
+            )
+        return None
+
+    if unique_times:
+        merged_ranges = _merge_range_payloads(
+            state.coverage_ranges_json or [],
+            _build_range_payload_from_open_times(unique_times, timeframe_to_ms(effective_timeframe)),
+            timeframe_to_ms(effective_timeframe),
+        )
+        state.coverage_ranges_json = merged_ranges
+        state.coverage_start_ms, state.coverage_end_ms = _select_primary_range_window_ms(merged_ranges)
+        db.add(state)
+        db.commit()
+        db.refresh(state)
+        invalidate_market_overview_cache()
+
+    if force_rebuild:
+        return recompute_market_overview_state(db, timeframe=effective_timeframe, force=True)
+
+    if _state_age_seconds(state) >= settings.market_overview_rebuild_dedupe_seconds:
+        return recompute_market_overview_state(db, timeframe=effective_timeframe, force=True)
+    return _serialize_market_overview_state(state)
+
+
+
+def recompute_market_overview_state(
+    db: Session,
+    *,
+    timeframe: str | None = None,
+    force: bool = False,
+    force_coverage_bootstrap: bool = False,
+    latest_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from app.services.market_data_sync import (
+        build_market_sync_gate_status,
         get_csv_ingestion_backlog,
         get_latest_market_coverage_snapshot,
-        get_market_sync_gate_status,
         serialize_csv_ingestion_job,
     )
 
-    total_candles = db.scalar(select(func.count()).select_from(MarketCandle)) or 0
-    total_symbols = db.scalar(select(func.count(func.distinct(MarketCandle.market_symbol))).select_from(MarketCandle)) or 0
-    coverage_ranges = get_market_data_coverage_ranges(db)
-    coverage_start, coverage_end = get_market_data_coverage(db)
-    jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.requested_at.desc()).limit(10)).all()
-    sync_states = db.scalars(select(MarketSyncState).order_by(MarketSyncState.base_symbol.asc())).all()
-    gate_status = get_market_sync_gate_status(db)
-    latest_snapshot = get_latest_market_coverage_snapshot(db) or {}
-    tier1_states = [state for state in sync_states if state.priority_tier == "tier1"]
-    tier2_states = [state for state in sync_states if state.priority_tier == "tier2"]
-    return {
-        "historical_data_dir": str(settings.historical_data_dir),
-        "base_timeframe": settings.historical_base_timeframe,
-        "total_candles": total_candles,
-        "total_symbols": total_symbols,
-        "coverage_start_ms": datetime_to_ms(coverage_start) if coverage_start else None,
-        "coverage_end_ms": datetime_to_ms(coverage_end) if coverage_end else None,
-        "coverage_ranges": [
-            {
-                "start_ms": datetime_to_ms(range_start),
-                "end_ms": datetime_to_ms(range_end),
-            }
-            for range_start, range_end in coverage_ranges
-        ],
-        "recent_csv_jobs": [serialize_csv_ingestion_job(job) for job in jobs],
-        "ingest_backlog": get_csv_ingestion_backlog(db),
-        "sync_cursors": [
-            {
-                "base_symbol": state.base_symbol,
-                "timeframe": state.timeframe,
-                "status": state.status,
-                "last_synced_open_time_ms": state.last_synced_open_time_ms,
-                "last_sync_completed_at_ms": datetime_to_ms(state.last_sync_completed_at)
-                if state.last_sync_completed_at
-                else None,
-                "notes": state.notes_json or {},
-            }
-            for state in sync_states
-        ],
-        "tier1_freshness_ms_p95": _freshness_p95_ms(tier1_states),
-        "tier2_freshness_ms_p95": _freshness_p95_ms(tier2_states),
-        "bootstrap_pending_count": db.scalar(
-            select(func.count()).select_from(MarketInstrument).where(MarketInstrument.bootstrap_status != "ready")
+    effective_timeframe = timeframe or settings.historical_base_timeframe
+    state = _load_market_overview_state(db, effective_timeframe)
+    if state is not None and not force and not force_coverage_bootstrap:
+        if _state_age_seconds(state) < settings.market_overview_rebuild_dedupe_seconds:
+            return _serialize_market_overview_state(state)
+
+    if state is None:
+        state = MarketOverviewState(
+            id=new_id("moview"),
+            timeframe=effective_timeframe,
+            created_at=utc_now(),
         )
-        or 0,
-        "backfill_lag_symbol_count": sum(1 for state in sync_states if (state.notes_json or {}).get("backfill_pending")),
-        "market_sync": gate_status,
-        "latest_coverage_snapshot": latest_snapshot,
-    }
+
+    if force_coverage_bootstrap or not (state.coverage_ranges_json or []):
+        coverage_ranges_payload = _serialize_coverage_ranges(get_market_data_coverage_ranges(db, timeframe=effective_timeframe))
+    else:
+        coverage_ranges_payload = _normalize_range_payloads(state.coverage_ranges_json or [])
+    coverage_start_ms, coverage_end_ms = _select_primary_range_window_ms(coverage_ranges_payload)
+
+    latest_snapshot_payload = latest_snapshot if latest_snapshot is not None else (get_latest_market_coverage_snapshot(db) or {})
+    build_market_sync_gate_status(latest_snapshot_payload or None)
+
+    sync_states = db.scalars(
+        select(MarketSyncState)
+        .where(MarketSyncState.timeframe == effective_timeframe)
+        .order_by(MarketSyncState.base_symbol.asc())
+    ).all()
+    recent_jobs = db.scalars(
+        select(CsvIngestionJob).order_by(CsvIngestionJob.requested_at.desc(), CsvIngestionJob.id.desc()).limit(10)
+    ).all()
+    ingest_backlog = get_csv_ingestion_backlog(db)
+
+    state.timeframe = effective_timeframe
+    state.total_candles_estimate = _estimate_total_candles(db)
+    state.total_symbols = len(sync_states)
+    state.coverage_start_ms = coverage_start_ms
+    state.coverage_end_ms = coverage_end_ms
+    state.coverage_ranges_json = coverage_ranges_payload
+    state.bootstrap_pending_count = db.scalar(
+        select(func.count())
+        .select_from(MarketInstrument)
+        .where(MarketInstrument.bootstrap_status != "ready")
+    ) or 0
+    state.backfill_lag_symbol_count = sum(
+        1 for sync_state in sync_states if (sync_state.notes_json or {}).get("backfill_pending")
+    )
+    state.tier1_freshness_ms_p95 = _freshness_p95_ms([item for item in sync_states if item.priority_tier == "tier1"])
+    state.tier2_freshness_ms_p95 = _freshness_p95_ms([item for item in sync_states if item.priority_tier == "tier2"])
+    state.failed_sync_count = sum(1 for sync_state in sync_states if sync_state.status == "failed")
+    state.skipped_sync_count = sum(1 for sync_state in sync_states if sync_state.status == "skipped")
+    state.ingest_backlog_json = ingest_backlog
+    state.recent_csv_jobs_json = [serialize_csv_ingestion_job(job) for job in recent_jobs]
+    state.source_snapshot_id = str(latest_snapshot_payload.get("id")) if latest_snapshot_payload else None
+    state.rebuilt_at = utc_now()
+    db.add(state)
+    db.commit()
+    db.refresh(state)
+    invalidate_market_overview_cache()
+    return _serialize_market_overview_state(state)
+
+
+
+def get_market_overview(db: Session) -> dict[str, Any]:
+    cached_payload = _get_cached_market_overview_payload()
+    if cached_payload is not None:
+        return cached_payload
+
+    acquired_refresh = _OVERVIEW_REFRESH_LOCK.acquire(blocking=False)
+    if not acquired_refresh:
+        cached_payload = _get_cached_market_overview_payload(ignore_ttl=True)
+        if cached_payload is not None:
+            return cached_payload
+        _OVERVIEW_REFRESH_LOCK.acquire()
+        acquired_refresh = True
+
+    try:
+        cached_payload = _get_cached_market_overview_payload()
+        if cached_payload is not None:
+            return cached_payload
+        payload = _load_market_overview_payload(db)
+        _store_cached_market_overview_payload(payload)
+        return copy.deepcopy(payload)
+    except Exception:
+        cached_payload = _get_cached_market_overview_payload(ignore_ttl=True)
+        if cached_payload is not None:
+            return cached_payload
+        raise
+    finally:
+        if acquired_refresh:
+            _OVERVIEW_REFRESH_LOCK.release()
+
 
 
 def list_market_symbols(db: Session) -> list[str]:
@@ -404,22 +548,26 @@ def list_market_symbols(db: Session) -> list[str]:
     return list(rows)
 
 
+
 def get_market_sync_status(db: Session) -> dict[str, Any]:
     from app.services.market_data_sync import (
+        build_market_sync_gate_status,
         get_csv_ingestion_backlog,
         get_latest_market_coverage_snapshot,
-        get_market_sync_gate_status,
     )
 
-    gate_status = get_market_sync_gate_status(db)
-    latest_snapshot = get_latest_market_coverage_snapshot(db) or {}
+    latest_snapshot = get_latest_market_coverage_snapshot(db)
+    gate_status = build_market_sync_gate_status(latest_snapshot)
     recent_attempts = db.scalars(
-        select(MarketSyncState).where(MarketSyncState.last_error.is_not(None)).order_by(MarketSyncState.updated_at.desc()).limit(10)
+        select(MarketSyncState)
+        .where(MarketSyncState.last_error.is_not(None))
+        .order_by(MarketSyncState.updated_at.desc())
+        .limit(10)
     ).all()
     return {
         **gate_status,
         "ingest_backlog": get_csv_ingestion_backlog(db),
-        "latest_snapshot": latest_snapshot,
+        "latest_snapshot": latest_snapshot or {},
         "recent_errors": [
             {
                 "base_symbol": state.base_symbol,
@@ -435,8 +583,11 @@ def get_market_sync_status(db: Session) -> dict[str, Any]:
     }
 
 
+
 def list_market_universe(db: Session) -> list[dict[str, Any]]:
-    instruments = db.scalars(select(MarketInstrument).order_by(MarketInstrument.priority_tier.asc(), MarketInstrument.instrument_id.asc())).all()
+    instruments = db.scalars(
+        select(MarketInstrument).order_by(MarketInstrument.priority_tier.asc(), MarketInstrument.instrument_id.asc())
+    ).all()
     states = {
         state.base_symbol: state
         for state in db.scalars(select(MarketSyncState)).all()
@@ -472,6 +623,98 @@ def list_market_universe(db: Session) -> list[dict[str, Any]]:
     ]
 
 
+
+def _load_market_overview_payload(db: Session) -> dict[str, Any]:
+    from app.services.market_data_sync import build_market_sync_gate_status, get_latest_market_coverage_snapshot
+
+    state = _load_market_overview_state(db, settings.historical_base_timeframe)
+    if state is None:
+        state_payload = recompute_market_overview_state(
+            db,
+            force=True,
+            force_coverage_bootstrap=True,
+        )
+    elif _state_age_seconds(state) >= settings.market_overview_max_staleness_seconds:
+        state_payload = recompute_market_overview_state(db, force=True)
+    else:
+        state_payload = _serialize_market_overview_state(state)
+
+    latest_snapshot = get_latest_market_coverage_snapshot(db)
+    market_sync = build_market_sync_gate_status(latest_snapshot)
+    return {
+        "historical_data_dir": str(settings.historical_data_dir),
+        "base_timeframe": settings.historical_base_timeframe,
+        "total_candles": int(state_payload.get("total_candles") or 0),
+        "total_symbols": int(state_payload.get("total_symbols") or 0),
+        "coverage_start_ms": state_payload.get("coverage_start_ms"),
+        "coverage_end_ms": state_payload.get("coverage_end_ms"),
+        "coverage_ranges": state_payload.get("coverage_ranges") or [],
+        "recent_csv_jobs": state_payload.get("recent_csv_jobs") or [],
+        "ingest_backlog": state_payload.get("ingest_backlog") or {},
+        "sync_cursor_counts": state_payload.get("sync_cursor_counts") or {"total": 0, "failed": 0, "skipped": 0},
+        "tier1_freshness_ms_p95": state_payload.get("tier1_freshness_ms_p95"),
+        "tier2_freshness_ms_p95": state_payload.get("tier2_freshness_ms_p95"),
+        "bootstrap_pending_count": int(state_payload.get("bootstrap_pending_count") or 0),
+        "backfill_lag_symbol_count": int(state_payload.get("backfill_lag_symbol_count") or 0),
+        "market_sync": market_sync,
+        "latest_coverage_snapshot": latest_snapshot or {},
+    }
+
+
+
+def _serialize_market_overview_state(state: MarketOverviewState) -> dict[str, Any]:
+    return {
+        "timeframe": state.timeframe,
+        "total_candles": int(state.total_candles_estimate or 0),
+        "total_symbols": int(state.total_symbols or 0),
+        "coverage_start_ms": state.coverage_start_ms,
+        "coverage_end_ms": state.coverage_end_ms,
+        "coverage_ranges": _normalize_range_payloads(state.coverage_ranges_json or []),
+        "recent_csv_jobs": state.recent_csv_jobs_json or [],
+        "ingest_backlog": state.ingest_backlog_json or {},
+        "sync_cursor_counts": {
+            "total": int(state.total_symbols or 0),
+            "failed": int(state.failed_sync_count or 0),
+            "skipped": int(state.skipped_sync_count or 0),
+        },
+        "tier1_freshness_ms_p95": state.tier1_freshness_ms_p95,
+        "tier2_freshness_ms_p95": state.tier2_freshness_ms_p95,
+        "bootstrap_pending_count": int(state.bootstrap_pending_count or 0),
+        "backfill_lag_symbol_count": int(state.backfill_lag_symbol_count or 0),
+        "source_snapshot_id": state.source_snapshot_id,
+        "rebuilt_at_ms": datetime_to_ms(state.rebuilt_at),
+    }
+
+
+
+def _load_market_overview_state(db: Session, timeframe: str) -> MarketOverviewState | None:
+    return db.scalar(
+        select(MarketOverviewState)
+        .where(MarketOverviewState.timeframe == timeframe)
+        .limit(1)
+    )
+
+
+
+def _estimate_total_candles(db: Session) -> int:
+    dialect_name = (db.bind.dialect.name if db.bind is not None else "").lower()
+    if dialect_name != "postgresql":
+        return int(db.scalar(select(func.count()).select_from(MarketCandle)) or 0)
+    estimated = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(child.reltuples)::bigint, 0)
+            FROM pg_class parent
+            JOIN pg_inherits inherit ON inherit.inhparent = parent.oid
+            JOIN pg_class child ON child.oid = inherit.inhrelid
+            WHERE parent.relname = 'market_candles'
+            """
+        )
+    ).scalar_one()
+    return int(estimated or 0)
+
+
+
 def _freshness_p95_ms(states: list[MarketSyncState]) -> int | None:
     values = []
     now_ms = datetime_to_ms(utc_now())
@@ -486,8 +729,120 @@ def _freshness_p95_ms(states: list[MarketSyncState]) -> int | None:
     return values[index]
 
 
+
+def _normalize_range_payloads(ranges: Sequence[dict[str, Any]]) -> list[dict[str, int]]:
+    normalized = []
+    for item in ranges:
+        start_ms = item.get("start_ms")
+        end_ms = item.get("end_ms")
+        if start_ms is None or end_ms is None:
+            continue
+        start_value = int(start_ms)
+        end_value = int(end_ms)
+        if end_value < start_value:
+            continue
+        normalized.append({"start_ms": start_value, "end_ms": end_value})
+    normalized.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
+    return normalized
+
+
+
+def _serialize_coverage_ranges(ranges: Sequence[tuple[datetime, datetime]]) -> list[dict[str, int]]:
+    return [
+        {"start_ms": datetime_to_ms(start), "end_ms": datetime_to_ms(end)}
+        for start, end in ranges
+    ]
+
+
+
+def _range_payload_to_datetimes(ranges: Sequence[dict[str, Any]]) -> list[tuple[datetime, datetime]]:
+    return [
+        (ms_to_datetime(int(item["start_ms"])), ms_to_datetime(int(item["end_ms"])))
+        for item in _normalize_range_payloads(ranges)
+    ]
+
+
+
+def _build_range_payload_from_open_times(open_times_ms: Sequence[int], gap_threshold_ms: int) -> list[dict[str, int]]:
+    if not open_times_ms:
+        return []
+    sorted_times = sorted({int(item) for item in open_times_ms})
+    start_ms = sorted_times[0]
+    previous_ms = sorted_times[0]
+    ranges: list[dict[str, int]] = []
+    for current_ms in sorted_times[1:]:
+        if current_ms - previous_ms > gap_threshold_ms:
+            ranges.append({"start_ms": start_ms, "end_ms": previous_ms})
+            start_ms = current_ms
+        previous_ms = current_ms
+    ranges.append({"start_ms": start_ms, "end_ms": previous_ms})
+    return ranges
+
+
+
+def _merge_range_payloads(
+    existing_ranges: Sequence[dict[str, Any]],
+    new_ranges: Sequence[dict[str, Any]],
+    gap_threshold_ms: int,
+) -> list[dict[str, int]]:
+    merged_source = _normalize_range_payloads(existing_ranges) + _normalize_range_payloads(new_ranges)
+    if not merged_source:
+        return []
+    merged_source.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
+    merged_ranges = [dict(merged_source[0])]
+    for current in merged_source[1:]:
+        last = merged_ranges[-1]
+        if current["start_ms"] - last["end_ms"] <= gap_threshold_ms:
+            last["end_ms"] = max(last["end_ms"], current["end_ms"])
+            continue
+        merged_ranges.append(dict(current))
+    return merged_ranges
+
+
+
+def _select_primary_range_window_ms(ranges: Sequence[dict[str, Any]]) -> tuple[int | None, int | None]:
+    normalized = _normalize_range_payloads(ranges)
+    if not normalized:
+        return None, None
+    best_range = max(
+        normalized,
+        key=lambda item: ((item["end_ms"] - item["start_ms"]), item["end_ms"]),
+    )
+    return best_range["start_ms"], best_range["end_ms"]
+
+
+
+def _state_age_seconds(state: MarketOverviewState) -> float:
+    rebuilt_at = state.rebuilt_at
+    if rebuilt_at.tzinfo is None:
+        rebuilt_at = rebuilt_at.replace(tzinfo=utc_now().tzinfo)
+    return max((utc_now() - rebuilt_at).total_seconds(), 0.0)
+
+
+
+def _get_cached_market_overview_payload(*, ignore_ttl: bool = False) -> dict[str, Any] | None:
+    with _OVERVIEW_CACHE_LOCK:
+        if _OVERVIEW_CACHE_PAYLOAD is None:
+            return None
+        if not ignore_ttl:
+            age_seconds = time.monotonic() - _OVERVIEW_CACHE_AT_MONOTONIC
+            if age_seconds >= settings.market_overview_cache_ttl_seconds:
+                return None
+        return copy.deepcopy(_OVERVIEW_CACHE_PAYLOAD)
+
+
+
+def _store_cached_market_overview_payload(payload: dict[str, Any]) -> None:
+    global _OVERVIEW_CACHE_AT_MONOTONIC, _OVERVIEW_CACHE_PAYLOAD
+    with _OVERVIEW_CACHE_LOCK:
+        _OVERVIEW_CACHE_PAYLOAD = copy.deepcopy(payload)
+        _OVERVIEW_CACHE_AT_MONOTONIC = time.monotonic()
+
+
+
 def _bucket_expr(open_time_column, timeframe_ms: int):
     return open_time_column - (open_time_column % timeframe_ms)
+
 
 
 def _serialize_aggregated_candle_row(row) -> dict[str, Any]:

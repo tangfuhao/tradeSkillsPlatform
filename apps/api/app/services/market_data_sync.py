@@ -24,7 +24,14 @@ from app.models import (
     MarketSyncCursor,
     MarketSyncState,
 )
-from app.services.market_data_store import is_usdt_swap_symbol, parse_base_symbol, timeframe_to_ms
+from app.services.market_data_store import (
+    invalidate_market_overview_cache,
+    is_usdt_swap_symbol,
+    parse_base_symbol,
+    recompute_market_overview_state,
+    timeframe_to_ms,
+    update_market_overview_state_for_open_times,
+)
 from app.services.utils import datetime_to_ms, ms_to_datetime, new_id, utc_now
 
 
@@ -90,6 +97,8 @@ class MarketSyncSweepResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
 def run_startup_market_data_sync(db: Session) -> dict[str, Any]:
     started_at = utc_now()
     target_cutoff = compute_startup_sync_cutoff()
@@ -135,6 +144,8 @@ def discover_local_csv_ingestion_jobs(db: Session) -> dict[str, Any]:
     if discovered_jobs:
         db.add_all(discovered_jobs)
         db.commit()
+        recompute_market_overview_state(db, force=True)
+        invalidate_market_overview_cache()
 
     backlog = get_csv_ingestion_backlog(db)
     return {
@@ -156,31 +167,48 @@ def list_csv_ingestion_jobs(db: Session, *, status: str | None = None, limit: in
 
 
 def get_csv_ingestion_backlog(db: Session) -> dict[str, Any]:
-    jobs = db.scalars(select(CsvIngestionJob).order_by(CsvIngestionJob.requested_at.asc(), CsvIngestionJob.id.asc())).all()
-    pending_jobs = [job for job in jobs if job.status == "pending"]
-    running_jobs = [job for job in jobs if job.status == "running"]
-    failed_jobs = [job for job in jobs if job.status == "failed"]
-    completed_jobs = [job for job in jobs if job.status == "completed"]
-    if running_jobs:
+    counts = {
+        str(status): int(count)
+        for status, count in db.execute(
+            select(CsvIngestionJob.status, func.count().label("count")).group_by(CsvIngestionJob.status)
+        ).all()
+    }
+    pending_count = counts.get("pending", 0)
+    running_count = counts.get("running", 0)
+    failed_count = counts.get("failed", 0)
+    completed_count = counts.get("completed", 0)
+    if running_count:
         status = "running"
-    elif pending_jobs:
+    elif pending_count:
         status = "backlog"
-    elif failed_jobs:
+    elif failed_count:
         status = "failed"
     else:
         status = "idle"
+
+    oldest_pending_requested_at = db.scalar(
+        select(func.min(CsvIngestionJob.requested_at)).where(CsvIngestionJob.status == "pending")
+    )
+    latest_completed_at = db.scalar(
+        select(func.max(CsvIngestionJob.completed_at)).where(CsvIngestionJob.status == "completed")
+    )
+    pending_paths_sample = list(
+        db.scalars(
+            select(CsvIngestionJob.source_path)
+            .where(CsvIngestionJob.status == "pending")
+            .order_by(CsvIngestionJob.requested_at.asc(), CsvIngestionJob.id.asc())
+            .limit(5)
+        ).all()
+    )
     return {
         "status": status,
-        "pending_count": len(pending_jobs),
-        "running_count": len(running_jobs),
-        "failed_count": len(failed_jobs),
-        "completed_count": len(completed_jobs),
-        "oldest_pending_requested_at_ms": datetime_to_ms(pending_jobs[0].requested_at) if pending_jobs else None,
-        "latest_completed_at_ms": max(
-            (datetime_to_ms(job.completed_at) for job in completed_jobs if job.completed_at is not None),
-            default=None,
-        ),
-        "pending_paths_sample": [job.source_path for job in pending_jobs[:5]],
+        "pending_count": pending_count,
+        "running_count": running_count,
+        "failed_count": failed_count,
+        "completed_count": completed_count,
+        "oldest_pending_requested_at_ms": datetime_to_ms(oldest_pending_requested_at) if oldest_pending_requested_at else None,
+        "latest_completed_at_ms": datetime_to_ms(latest_completed_at) if latest_completed_at else None,
+        "pending_paths_sample": pending_paths_sample,
     }
 
 
@@ -249,6 +277,8 @@ def run_csv_ingestion_job(db: Session, job_id: str, *, runner_id: str = "manual-
         job.completed_at = now
         db.add(job)
         db.commit()
+        recompute_market_overview_state(db, force=True)
+        invalidate_market_overview_cache()
         return serialize_csv_ingestion_job(job)
 
     strategy = _csv_ingestion_strategy(db)
@@ -308,6 +338,8 @@ def run_csv_ingestion_job(db: Session, job_id: str, *, runner_id: str = "manual-
     job.completed_at = utc_now()
     db.add(job)
     db.commit()
+    recompute_market_overview_state(db, force=True)
+    invalidate_market_overview_cache()
     db.refresh(job)
     return serialize_csv_ingestion_job(job)
 
@@ -346,6 +378,7 @@ def _ingest_csv_file_via_batched_inserts(db: Session, path: Path) -> dict[str, A
     rows_inserted = 0
     coverage_start_ms: int | None = None
     coverage_end_ms: int | None = None
+    inserted_open_times_ms: set[int] = set()
     batch: list[dict[str, Any]] = []
     now = utc_now()
 
@@ -361,11 +394,15 @@ def _ingest_csv_file_via_batched_inserts(db: Session, path: Path) -> dict[str, A
             coverage_start_ms = open_time_ms if coverage_start_ms is None else min(coverage_start_ms, open_time_ms)
             coverage_end_ms = open_time_ms if coverage_end_ms is None else max(coverage_end_ms, open_time_ms)
             batch.append(normalized)
+            inserted_open_times_ms.add(int(open_time_ms))
             if len(batch) >= BULK_BATCH_SIZE:
                 rows_inserted += _flush_batch(db, batch)
                 batch.clear()
         if batch:
             rows_inserted += _flush_batch(db, batch)
+
+    if inserted_open_times_ms:
+        update_market_overview_state_for_open_times(db, sorted(inserted_open_times_ms))
 
     return {
         "rows_seen": rows_seen,
@@ -387,6 +424,7 @@ def _ingest_csv_file_via_postgresql_staging(db: Session, path: Path) -> dict[str
     rows_staged = 0
     coverage_start_ms: int | None = None
     coverage_end_ms: int | None = None
+    inserted_open_times_ms: set[int] = set()
     now = utc_now()
     copy_sql = f"COPY {_CSV_INGEST_STAGE_TABLE} ({', '.join(_CSV_INGEST_STAGE_COLUMNS)}) FROM STDIN"
     driver_connection = connection.connection.driver_connection
@@ -403,10 +441,13 @@ def _ingest_csv_file_via_postgresql_staging(db: Session, path: Path) -> dict[str
                     open_time_ms = normalized["open_time_ms"]
                     coverage_start_ms = open_time_ms if coverage_start_ms is None else min(coverage_start_ms, open_time_ms)
                     coverage_end_ms = open_time_ms if coverage_end_ms is None else max(coverage_end_ms, open_time_ms)
+                    inserted_open_times_ms.add(int(open_time_ms))
                     copy.write_row(tuple(normalized[column] for column in _CSV_INGEST_STAGE_COLUMNS))
                     rows_staged += 1
 
     rows_inserted = _merge_stage_into_market_candles(connection, _CSV_INGEST_STAGE_TABLE)
+    if inserted_open_times_ms:
+        update_market_overview_state_for_open_times(db, sorted(inserted_open_times_ms))
     return {
         "rows_seen": rows_seen,
         "rows_staged": rows_staged,
@@ -508,8 +549,11 @@ def _flush_batch(db: Session, batch: list[dict[str, Any]]) -> int:
 
 def insert_candle_batch(db: Session, batch: list[dict[str, Any]]) -> int:
     """Public API used by OKX incremental sync (commits per batch)."""
+    open_times_ms = sorted({int(row["open_time_ms"]) for row in batch if row.get("timeframe") == settings.historical_base_timeframe})
     with bulk_operation_session(db):
         total = _flush_batch(db, batch)
+        if open_times_ms:
+            update_market_overview_state_for_open_times(db, open_times_ms)
         db.commit()
         return total
 
@@ -1385,7 +1429,10 @@ def recompute_market_coverage_snapshot(db: Session, *, universe_version: int | N
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)
-    return coverage_snapshot_to_dict(snapshot)
+    snapshot_payload = coverage_snapshot_to_dict(snapshot)
+    recompute_market_overview_state(db, force=True, latest_snapshot=snapshot_payload)
+    invalidate_market_overview_cache()
+    return snapshot_payload
 
 
 def get_latest_market_coverage_snapshot(db: Session) -> dict[str, Any] | None:
@@ -1438,8 +1485,7 @@ def get_fresh_market_symbols_for_dispatch(db: Session, dispatch_as_of_ms: int) -
     return set(rows)
 
 
-def get_market_sync_gate_status(db: Session) -> dict[str, Any]:
-    snapshot = get_latest_market_coverage_snapshot(db)
+def build_market_sync_gate_status(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if snapshot is None:
         return {
             "status": "blocked",
@@ -1473,6 +1519,11 @@ def get_market_sync_gate_status(db: Session) -> dict[str, Any]:
         "missing_symbols_sample": snapshot["missing_symbols_sample"],
         "universe_version": snapshot["universe_version"],
     }
+
+
+def get_market_sync_gate_status(db: Session, *, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    latest_snapshot = snapshot if snapshot is not None else get_latest_market_coverage_snapshot(db)
+    return build_market_sync_gate_status(latest_snapshot)
 
 
 def is_retryable_sync_exception(exc: Exception) -> bool:

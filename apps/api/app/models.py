@@ -277,6 +277,7 @@ class MarketCandle(Base):
     __tablename__ = "market_candles"
     __table_args__ = (
         Index("ix_market_candle_partition_lookup", "open_time_ms"),
+        Index("ix_market_candle_timeframe_open_time", "timeframe", "open_time_ms"),
         Index("ix_market_candle_symbol_time", "market_symbol", "timeframe", "open_time_ms"),
         Index("ix_market_candle_base_time", "base_symbol", "timeframe", "open_time_ms"),
         {"postgresql_partition_by": "RANGE (open_time_ms)"},
@@ -442,3 +443,31 @@ class MarketCoverageSnapshot(Base):
     missing_symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class MarketOverviewState(Base):
+    __tablename__ = "market_overview_states"
+    __table_args__ = (
+        UniqueConstraint("timeframe", name="uq_market_overview_state_timeframe"),
+        Index("ix_market_overview_state_rebuilt", "rebuilt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(16), default="1m")
+    total_candles_estimate: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    coverage_start_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    coverage_end_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    coverage_ranges_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    bootstrap_pending_count: Mapped[int] = mapped_column(Integer, default=0)
+    backfill_lag_symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    tier1_freshness_ms_p95: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tier2_freshness_ms_p95: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    failed_sync_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_sync_count: Mapped[int] = mapped_column(Integer, default=0)
+    ingest_backlog_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    recent_csv_jobs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_snapshot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

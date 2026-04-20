@@ -173,7 +173,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -311,7 +311,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -371,7 +371,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -450,7 +450,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -539,7 +539,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -610,7 +610,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -651,7 +651,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -677,7 +677,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
@@ -718,7 +718,7 @@ class ExecutionLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "app.services.backtest_service.get_market_data_coverage_ranges",
+                "app.services.backtest_service.get_market_overview_coverage_ranges",
                 return_value=[(start_time - timedelta(days=1), end_time + timedelta(days=1))],
             ),
             patch("app.services.backtest_service.build_trigger_times", return_value=(trigger_times, False)),
