@@ -137,7 +137,9 @@ ensure_web_dependencies() {
   log "installing web dependencies"
   (
     cd "$ROOT/apps/web"
-    "${install_cmd[@]}"
+    # Cursor sometimes prepends its own Node binary to PATH. Ubuntu's packaged npm
+    # expects the distro Node runtime/module layout; ensure we use /usr/bin/node.
+    PATH="/usr/bin:$PATH" "${install_cmd[@]}"
   )
   write_stamp "$WEB_DEPS_STAMP" "$fingerprint"
 }

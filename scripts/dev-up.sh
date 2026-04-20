@@ -63,7 +63,27 @@ read_pid() {
 
 listening_pid() {
   local port="$1"
-  lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+  # lsof relies on /proc for PID discovery. On some systems (e.g. /proc with hidepid),
+  # non-root users cannot see PIDs for processes they don't own, even though the port
+  # is actively listening. Fall back to `ss` so we can still detect "something is
+  # listening" and proceed when an externally-managed service (like system postgres)
+  # is already up.
+  local pid
+  pid="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$pid" ]]; then
+    printf '%s' "$pid"
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    # If the port is listening but PID is not visible, return a sentinel.
+    if ss -ltnH "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+      printf '%s' "listening"
+      return 0
+    fi
+  fi
+
+  return 0
 }
 
 ensure_port_available() {
@@ -175,7 +195,19 @@ ensure_postgres_cluster() {
 bootstrap_postgres_runtime_db() {
   require_cmd psql
   require_cmd createdb
-  psql -h 127.0.0.1 -p "$POSTGRES_PORT" -d postgres -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+
+  # Prefer using the local postgres OS user via sudo to avoid interactive password
+  # prompts (common on Ubuntu with peer auth on unix socket, but md5 on TCP).
+  local psql_cmd createdb_cmd
+  if command -v sudo >/dev/null 2>&1 && sudo -n -u postgres true >/dev/null 2>&1; then
+    psql_cmd=(sudo -n -u postgres psql -v ON_ERROR_STOP=1 -d postgres)
+    createdb_cmd=(sudo -n -u postgres createdb)
+  else
+    psql_cmd=(psql -h 127.0.0.1 -p "$POSTGRES_PORT" -d postgres -v ON_ERROR_STOP=1)
+    createdb_cmd=(createdb -h 127.0.0.1 -p "$POSTGRES_PORT")
+  fi
+
+  "${psql_cmd[@]}" <<'SQL' >/dev/null
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tradeskills') THEN
@@ -185,8 +217,8 @@ END
 $$;
 SQL
 
-  if [[ "$(psql -h 127.0.0.1 -p "$POSTGRES_PORT" -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname = 'tradeskills'")" != "1" ]]; then
-    createdb -h 127.0.0.1 -p "$POSTGRES_PORT" -O tradeskills tradeskills
+  if [[ "$("${psql_cmd[@]}" -Atqc "SELECT 1 FROM pg_database WHERE datname = 'tradeskills'")" != "1" ]]; then
+    "${createdb_cmd[@]}" -O tradeskills tradeskills
   fi
 }
 
@@ -371,7 +403,7 @@ start_service \
   "$RUNNER_HEALTH_URL" \
   "$RUNNER_PORT" \
   30 \
-  "$ROOT/.venv/bin/python" -m uvicorn runner.main:app --reload --host 0.0.0.0 --port "$RUNNER_PORT"
+  "$ROOT/.venv/bin/python" -m uvicorn runner.main:app --reload --host 127.0.0.1 --port "$RUNNER_PORT"
 
 start_service \
   api \
@@ -379,7 +411,7 @@ start_service \
   "$API_HEALTH_URL" \
   "$API_PORT" \
   120 \
-  "$ROOT/.venv/bin/python" -m uvicorn app.main:app --reload --host 0.0.0.0 --port "$API_PORT"
+  "$ROOT/.venv/bin/python" -m uvicorn app.main:app --reload --host 127.0.0.1 --port "$API_PORT"
 
 start_background_service \
   worker \
@@ -393,7 +425,7 @@ start_service \
   "$WEB_HEALTH_URL" \
   "$WEB_PORT" \
   30 \
-  npm run dev -- --host 0.0.0.0 --port "$WEB_PORT"
+  env PATH="/usr/bin:$PATH" npm run dev -- --host 0.0.0.0 --port "$WEB_PORT"
 
 trap - ERR
 

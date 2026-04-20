@@ -10,8 +10,8 @@ import type {
   Skill,
 } from './types';
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
-const agentRunnerBaseUrl = import.meta.env.VITE_AGENT_RUNNER_BASE_URL ?? 'http://localhost:8100';
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '';
+const agentRunnerBaseUrl = import.meta.env.VITE_AGENT_RUNNER_BASE_URL || '';
 
 function extractErrorMessage(body: string, status: number): string {
   if (!body) {
